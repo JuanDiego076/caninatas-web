@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 
 /* =========================================================================
    CANINATAS · Registro y Control de la Manada · Fase 1
-   App React autocontenida · móvil-first (~380px) · persistencia window.storage
+   App React autocontenida · móvil-first (~380px) · persistencia localStorage
    Modelo de datos alineado con el Documento de Arquitectura Fase 0.
    ========================================================================= */
 
@@ -198,34 +198,28 @@ const semanaDesde = (lunesISO) => Array.from({ length: 7 }, (_, i) => sumarDias(
 const etiquetaDia = (iso) => `${DIAS_CORTO[diaSemana(iso)]} ${Number(iso.split("-")[2])}`;
 
 /* ---------------------- Capa de almacenamiento ------------------------- */
-// Claves jerárquicas (Arquitectura §5). Fallback a memoria si no hay window.storage.
+// Claves jerárquicas (Arquitectura §5). Persiste en localStorage (navegador).
+// Plan B en memoria por si localStorage falla (ej. modo privado de Safari).
 const memStore = {};
 const store = {
   async set(key, value) {
     try {
-      if (typeof window !== "undefined" && window.storage) {
-        await window.storage.set(key, JSON.stringify(value));
-        return true;
-      }
+      localStorage.setItem(key, JSON.stringify(value));
+      return true;
     } catch (e) { /* cae a memoria */ }
     memStore[key] = JSON.stringify(value);
     return true;
   },
   async get(key) {
     try {
-      if (typeof window !== "undefined" && window.storage) {
-        const r = await window.storage.get(key);
-        return r ? JSON.parse(r.value) : null;
-      }
+      const r = localStorage.getItem(key);
+      return r ? JSON.parse(r) : null;
     } catch (e) { /* cae a memoria */ }
     return memStore[key] ? JSON.parse(memStore[key]) : null;
   },
   async list(prefix) {
     try {
-      if (typeof window !== "undefined" && window.storage) {
-        const r = await window.storage.list(prefix);
-        return r && r.keys ? r.keys : [];
-      }
+      return Object.keys(localStorage).filter((k) => k.startsWith(prefix));
     } catch (e) { /* cae a memoria */ }
     return Object.keys(memStore).filter((k) => k.startsWith(prefix));
   },
