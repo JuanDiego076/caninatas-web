@@ -399,7 +399,7 @@ export default function App() {
         </div>
       )}
 
-      <div style={{ paddingBottom: 88 }}>
+      <div style={{ paddingBottom: 96 }}>
         {tab === "manada" && <Manada ctx={ctx} />}
         {tab === "agenda" && <Agenda ctx={ctx} />}
         {tab === "paseos" && <Paseos ctx={ctx} />}
@@ -721,7 +721,7 @@ function DetallePerro({ ctx, perroId, onCerrar }) {
   if (pagoPendiente && dueno) alertas.push({ t: `Pago de ${nombreMes(per)} pendiente`, c: C.terracota });
 
   return (
-    <div style={S.detalleOverlay}>
+    <div className="cn-anclado" style={S.detalleOverlay}>
       {/* Barra superior */}
       <div style={S.detalleTop}>
         <button style={S.volverBtn} onClick={onCerrar}>‹ Volver</button>
@@ -2506,7 +2506,7 @@ function Resumen({ ctx }) {
 function Shell({ children }) {
   return (
     <div style={S.shell}>
-      <div style={S.frame}>{children}</div>
+      <div className="cn-frame" style={S.frame}>{children}</div>
     </div>
   );
 }
@@ -2533,12 +2533,12 @@ function BarraPestanas({ tab, setTab }) {
     { c: "resumen", l: "Resumen", i: "📊" },
   ];
   return (
-    <div style={S.tabbar}>
+    <div className="cn-anclado" style={S.tabbar}>
       {items.map((it) => (
         <button key={it.c} onClick={() => setTab(it.c)}
           style={{ ...S.tabItem, ...(tab === it.c ? S.tabItemOn : {}) }}>
-          <span style={{ fontSize: 20, filter: tab === it.c ? "none" : "grayscale(0.4)" }}>{it.i}</span>
-          <span style={{ fontSize: 10.5, fontWeight: tab === it.c ? 700 : 500 }}>{it.l}</span>
+          <span style={{ fontSize: 24, filter: tab === it.c ? "none" : "grayscale(0.4)" }}>{it.i}</span>
+          <span style={{ fontSize: 11.5, fontWeight: tab === it.c ? 700 : 500 }}>{it.l}</span>
         </button>
       ))}
     </div>
@@ -2548,7 +2548,7 @@ function BarraPestanas({ tab, setTab }) {
 function Modal({ titulo, onCerrar, children }) {
   return (
     <div style={S.overlay} onClick={onCerrar}>
-      <div style={S.modal} onClick={(e) => e.stopPropagation()}>
+      <div className="cn-anclado" style={S.modal} onClick={(e) => e.stopPropagation()}>
         <div style={S.modalHead}>
           <span style={S.modalTit}>{titulo}</span>
           <button style={S.cerrar} onClick={onCerrar}>✕</button>
@@ -2759,8 +2759,8 @@ const S = {
   vacio: { textAlign: "center", padding: "40px 30px", margin: "0 18px" },
 
   // Tabbar
-  tabbar: { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, boxSizing: "border-box", display: "flex", background: C.blanco, borderTop: `1px solid ${C.borde}`, padding: "8px 4px calc(8px + env(safe-area-inset-bottom))", zIndex: 50, boxShadow: "0 -4px 20px rgba(0,0,0,0.06)" },
-  tabItem: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "6px 0", border: "none", background: "transparent", color: C.gris, cursor: "pointer", borderRadius: 10, minWidth: 0 },
+  tabbar: { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, boxSizing: "border-box", display: "flex", background: C.blanco, borderTop: `1px solid ${C.borde}`, padding: "10px 6px calc(10px + env(safe-area-inset-bottom))", zIndex: 50, boxShadow: "0 -4px 20px rgba(0,0,0,0.06)" },
+  tabItem: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "8px 0", border: "none", background: "transparent", color: C.gris, cursor: "pointer", borderRadius: 12, minWidth: 0 },
   tabItemOn: { color: C.verde, background: C.cielo + "26" },
 
   // ---- Agenda (Fase 3) ----
@@ -2859,13 +2859,21 @@ function Estilos() {
   return (
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap');
+      html, body { margin: 0; padding: 0; width: 100%; overflow-x: hidden; }
+      #root { width: 100%; }
       html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-      * { -webkit-tap-highlight-color: transparent; }
+      * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
       button, a, select, input, textarea { touch-action: manipulation; }
       @keyframes girar { to { transform: rotate(360deg); } }
       input:focus, select:focus, textarea:focus { outline: 2px solid ${C.verdeClaro}; outline-offset: 1px; }
       button:focus-visible { outline: 2px solid ${C.verde}; outline-offset: 2px; }
       ::placeholder { color: #B7AE9F; }
+
+      /* En celular: ancho completo, sin tope ni borde a los lados */
+      @media (max-width: 560px) {
+        .cn-frame { max-width: 100% !important; box-shadow: none !important; }
+        .cn-anclado { max-width: 100% !important; }
+      }
     `}</style>
   );
 }
