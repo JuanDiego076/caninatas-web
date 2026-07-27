@@ -101,6 +101,27 @@ const estadoPagoPorC = (c) => ESTADOS_PAGO.find((e) => e.c === c) || ESTADOS_PAG
 // Bandera de módulo: pasarela real de pago (Arquitectura §4.7). Apagada por ahora.
 const PASARELA_ACTIVA = false; // config:pasarela_activa
 
+// Categorías de producto (Arquitectura §3)
+const CATEGORIAS = [
+  { c: "alimento", l: "Alimento", icono: "🦴" },
+  { c: "accesorio", l: "Accesorio", icono: "🦮" },
+  { c: "higiene", l: "Higiene", icono: "🧴" },
+  { c: "otro", l: "Otro", icono: "📦" },
+];
+const catPorC = (c) => CATEGORIAS.find((x) => x.c === c) || CATEGORIAS[3];
+
+// Estados de un pedido de tienda
+const ESTADOS_PEDIDO = [
+  { c: "pendiente", l: "Pendiente", color: "#B23A3A", bg: "#FBEAEA" },
+  { c: "entregado", l: "Entregado", color: "#3B7BB5", bg: "#E4EFF8" },
+  { c: "pagado", l: "Pagado", color: "#2F6B4F", bg: "#E4F0E9" },
+  { c: "anulado", l: "Anulado", color: "#7A736A", bg: "#EFEBE3" },
+];
+const estadoPedidoPorC = (c) => ESTADOS_PEDIDO.find((e) => e.c === c) || ESTADOS_PEDIDO[0];
+
+// Bandera de módulo: tienda (Arquitectura §4.7). Se enciende en la Fase 5.
+const TIENDA_ACTIVA = true; // config:tienda_activa
+
 /* ---------------------- Utilidades ------------------------------------- */
 const uid = (p) => `${p}_${Math.random().toString(36).slice(2, 8)}`;
 const hoyISO = () => {
@@ -177,17 +198,36 @@ const semanaDesde = (lunesISO) => Array.from({ length: 7 }, (_, i) => sumarDias(
 const etiquetaDia = (iso) => `${DIAS_CORTO[diaSemana(iso)]} ${Number(iso.split("-")[2])}`;
 
 /* ---------------------- Capa de almacenamiento ------------------------- */
+// Claves jerárquicas (Arquitectura §5). Fallback a memoria si no hay window.storage.
+const memStore = {};
 const store = {
   async set(key, value) {
-    localStorage.setItem(key, JSON.stringify(value));
+    try {
+      if (typeof window !== "undefined" && window.storage) {
+        await window.storage.set(key, JSON.stringify(value));
+        return true;
+      }
+    } catch (e) { /* cae a memoria */ }
+    memStore[key] = JSON.stringify(value);
     return true;
   },
   async get(key) {
-    const r = localStorage.getItem(key);
-    return r ? JSON.parse(r) : null;
+    try {
+      if (typeof window !== "undefined" && window.storage) {
+        const r = await window.storage.get(key);
+        return r ? JSON.parse(r.value) : null;
+      }
+    } catch (e) { /* cae a memoria */ }
+    return memStore[key] ? JSON.parse(memStore[key]) : null;
   },
   async list(prefix) {
-    return Object.keys(localStorage).filter((k) => k.startsWith(prefix));
+    try {
+      if (typeof window !== "undefined" && window.storage) {
+        const r = await window.storage.list(prefix);
+        return r && r.keys ? r.keys : [];
+      }
+    } catch (e) { /* cae a memoria */ }
+    return Object.keys(memStore).filter((k) => k.startsWith(prefix));
   },
 };
 
@@ -219,7 +259,15 @@ function datosEjemplo() {
     { id: uid("w"), fecha: sumarDias(hoyISO(), 1), ronda: "ronda2", modalidad: "individual", perro_ids: [p3], duracion: 45, nota: "", estado: "programado" },
     { id: uid("w"), fecha: sumarDias(hoyISO(), 2), ronda: "ronda3", modalidad: "individual", perro_ids: [p3], duracion: 45, nota: "", estado: "programado" },
   ];
-  return { duenos, perros, pagos, paseos };
+  const productos = [
+    { id: uid("prod"), nombre: "Snacks naturales", emoji: "🦴", descripcion: "Premios de pollo deshidratado, bolsa de 200g.", precio: 18000, categoria: "alimento", stock: 12, disponible: true },
+    { id: uid("prod"), nombre: "Pechera antitirón", emoji: "🦺", descripcion: "Talla M, ajustable. Cómoda para las lomas del barrio.", precio: 45000, categoria: "accesorio", stock: 5, disponible: true },
+    { id: uid("prod"), nombre: "Shampoo hipoalergénico", emoji: "🧴", descripcion: "Para piel sensible, 500ml. Aroma suave.", precio: 28000, categoria: "higiene", stock: 8, disponible: true },
+    { id: uid("prod"), nombre: "Collar reflectivo", emoji: "🟢", descripcion: "Visible en paseos de noche (Ronda 4). Verde Caninatas.", precio: 22000, categoria: "accesorio", stock: 0, disponible: true },
+    { id: uid("prod"), nombre: "Bolsas biodegradables", emoji: "♻️", descripcion: "Rollo x 120 bolsas para recoger en zonas comunes.", precio: 15000, categoria: "higiene", stock: 20, disponible: true },
+  ];
+  const pedidos = [];
+  return { duenos, perros, pagos, paseos, productos, pedidos };
 }
 
 /* ======================================================================= */
@@ -235,6 +283,8 @@ export default function App() {
   const [perros, setPerros] = useState([]);
   const [pagos, setPagos] = useState([]);
   const [paseos, setPaseos] = useState([]);
+  const [productos, setProductos] = useState([]);
+  const [pedidos, setPedidos] = useState([]);
 
   /* -------- Carga inicial -------- */
   useEffect(() => {
@@ -248,8 +298,17 @@ export default function App() {
             ...ej.perros.map((p) => store.set(`perros:${p.id}`, p)),
             ...ej.pagos.map((g) => store.set(`pagos:${g.periodo}:${g.id}`, g)),
             ...ej.paseos.map((w) => store.set(`paseos:${w.fecha}:${w.id}`, w)),
+            ...ej.productos.map((pr) => store.set(`productos:${pr.id}`, pr)),
           ]);
           await store.set("config:sembrado", true);
+          await store.set("config:sembrado_tienda", true);
+        }
+        // Sembrado incremental de tienda (para apps ya instaladas antes de la Fase 5)
+        const sembradoTienda = await store.get("config:sembrado_tienda");
+        if (!sembradoTienda) {
+          const ej = datosEjemplo();
+          await Promise.all(ej.productos.map((pr) => store.set(`productos:${pr.id}`, pr)));
+          await store.set("config:sembrado_tienda", true);
         }
         await recargar();
       } catch (e) {
@@ -267,16 +326,20 @@ export default function App() {
         const items = await Promise.all(keys.map((k) => store.get(k)));
         return items.filter(Boolean);
       };
-      const [ds, ps, gs, ws] = await Promise.all([
+      const [ds, ps, gs, ws, prs, pds] = await Promise.all([
         cargarPrefijo("duenos:"),
         cargarPrefijo("perros:"),
         cargarPrefijo("pagos:"),
         cargarPrefijo("paseos:"),
+        cargarPrefijo("productos:"),
+        cargarPrefijo("pedidos:"),
       ]);
       setDuenos(ds);
       setPerros(ps);
       setPagos(gs);
       setPaseos(ws);
+      setProductos(prs);
+      setPedidos(pds);
     } catch (e) {
       setError("Hubo un problema leyendo la información guardada.");
     }
@@ -303,10 +366,20 @@ export default function App() {
     await store.set(`pagos:${g.periodo}:${g.id}`, g);
     await recargar();
   };
+  const guardarProducto = async (producto) => {
+    const pr = producto.id ? producto : { ...producto, id: uid("prod") };
+    await store.set(`productos:${pr.id}`, pr);
+    await recargar();
+  };
+  const guardarPedido = async (pedido) => {
+    const pe = pedido.id ? pedido : { ...pedido, id: uid("ped"), fecha: hoyISO() };
+    await store.set(`pedidos:${pe.fecha}:${pe.id}`, pe);
+    await recargar();
+  };
 
   const ctx = {
-    duenos, perros, pagos, paseos,
-    guardarPerro, guardarDueno, guardarPaseo, guardarPago, recargar,
+    duenos, perros, pagos, paseos, productos, pedidos,
+    guardarPerro, guardarDueno, guardarPaseo, guardarPago, guardarProducto, guardarPedido, recargar,
     abrirDetalle: (id) => setPerroDetalleId(id),
     cerrarDetalle: () => setPerroDetalleId(null),
   };
@@ -337,6 +410,7 @@ export default function App() {
         {tab === "agenda" && <Agenda ctx={ctx} />}
         {tab === "paseos" && <Paseos ctx={ctx} />}
         {tab === "pagos" && <Pagos ctx={ctx} />}
+        {tab === "tienda" && TIENDA_ACTIVA && <Tienda ctx={ctx} />}
         {tab === "resumen" && <Resumen ctx={ctx} />}
       </div>
 
@@ -1919,10 +1993,413 @@ function TarjetaPasarela() {
 }
 
 /* ======================================================================= */
+/*                          TIENDA (FASE 5)                                */
+/*   Catálogo, inventario, carrito, checkout y pedidos.                    */
+/* ======================================================================= */
+function Tienda({ ctx }) {
+  const { productos, pedidos } = ctx;
+  const [vista, setVista] = useState("catalogo"); // catalogo | gestion | pedidos
+  const [carrito, setCarrito] = useState({}); // { productoId: cantidad }
+  const [checkout, setCheckout] = useState(false);
+
+  const items = Object.entries(carrito).filter(([, c]) => c > 0);
+  const totalItems = items.reduce((s, [, c]) => s + c, 0);
+  const totalCOP = items.reduce((s, [id, c]) => {
+    const pr = productos.find((p) => p.id === id);
+    return s + (pr ? pr.precio * c : 0);
+  }, 0);
+
+  const agregar = (prod) => {
+    setCarrito((c) => {
+      const actual = c[prod.id] || 0;
+      if (actual + 1 > prod.stock) return c; // no vender más que el stock
+      return { ...c, [prod.id]: actual + 1 };
+    });
+  };
+  const quitar = (prodId) => setCarrito((c) => ({ ...c, [prodId]: Math.max(0, (c[prodId] || 0) - 1) }));
+  const vaciar = () => setCarrito({});
+
+  return (
+    <div>
+      <Header titulo="Tienda" sub="Productos para la manada" />
+
+      <div style={S.segmento}>
+        <button style={vista === "catalogo" ? S.segActivo : S.segItem} onClick={() => setVista("catalogo")}>Catálogo</button>
+        <button style={vista === "pedidos" ? S.segActivo : S.segItem} onClick={() => setVista("pedidos")}>Pedidos</button>
+        <button style={vista === "gestion" ? S.segActivo : S.segItem} onClick={() => setVista("gestion")}>Gestión</button>
+      </div>
+
+      {vista === "catalogo" && (
+        <Catalogo ctx={ctx} carrito={carrito} onAgregar={agregar} onQuitar={quitar} />
+      )}
+      {vista === "gestion" && <GestionProductos ctx={ctx} />}
+      {vista === "pedidos" && <ListaPedidos ctx={ctx} />}
+
+      {/* Barra de carrito flotante */}
+      {vista === "catalogo" && totalItems > 0 && (
+        <button style={S.carritoBarra} onClick={() => setCheckout(true)}>
+          <span style={S.carritoCount}>{totalItems}</span>
+          <span style={{ flex: 1, textAlign: "left", fontWeight: 700 }}>Ver pedido</span>
+          <span style={{ fontWeight: 800 }}>{fmtCOP(totalCOP)}</span>
+        </button>
+      )}
+
+      {checkout && (
+        <Checkout ctx={ctx} carrito={carrito} onQuitar={quitar} onAgregar={agregar}
+          onVaciar={() => { vaciar(); setCheckout(false); }}
+          onListo={() => { vaciar(); setCheckout(false); setVista("pedidos"); }}
+          onCerrar={() => setCheckout(false)} />
+      )}
+    </div>
+  );
+}
+
+/* ---- Módulo 1: catálogo con filtro por categoría ---- */
+function Catalogo({ ctx, carrito, onAgregar, onQuitar }) {
+  const { productos } = ctx;
+  const [cat, setCat] = useState("todas");
+  const visibles = productos.filter((p) => p.disponible !== false && (cat === "todas" || p.categoria === cat));
+
+  return (
+    <div style={{ paddingBottom: 80 }}>
+      <div style={S.filtroFila}>
+        <button style={cat === "todas" ? S.filtroOn : S.filtro} onClick={() => setCat("todas")}>Todos</button>
+        {CATEGORIAS.map((c) => (
+          <button key={c.c} style={cat === c.c ? S.filtroOn : S.filtro} onClick={() => setCat(c.c)}>
+            {c.icono} {c.l}
+          </button>
+        ))}
+      </div>
+
+      {visibles.length === 0 && (
+        <Vacio icono="🛍️" titulo="Sin productos" texto="No hay productos en esta categoría todavía." />
+      )}
+
+      <div style={{ padding: "0 18px" }}>
+        {visibles.map((p) => {
+          const enCarrito = carrito[p.id] || 0;
+          const agotado = p.stock <= 0;
+          const topeAlcanzado = enCarrito >= p.stock;
+          return (
+            <div key={p.id} style={S.prodCard}>
+              <div style={S.prodEmoji}>{p.emoji || catPorC(p.categoria).icono}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 800, color: C.carbon, fontSize: 15 }}>{p.nombre}</span>
+                  {agotado && <span style={S.agotadoChip}>Agotado</span>}
+                </div>
+                <div style={{ fontSize: 12.5, color: C.gris, lineHeight: 1.35, margin: "2px 0 6px" }}>{p.descripcion}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontWeight: 800, color: C.verde, fontSize: 16 }}>{fmtCOP(p.precio)}</span>
+                  {agotado ? (
+                    <span style={{ fontSize: 12, color: C.gris }}>Sin existencias</span>
+                  ) : enCarrito === 0 ? (
+                    <button style={S.prodAdd} onClick={() => onAgregar(p)}>Agregar</button>
+                  ) : (
+                    <div style={S.stepperMini}>
+                      <button style={S.stepBtn} onClick={() => onQuitar(p.id)}>−</button>
+                      <span style={{ fontWeight: 800, minWidth: 20, textAlign: "center" }}>{enCarrito}</span>
+                      <button style={{ ...S.stepBtn, opacity: topeAlcanzado ? 0.35 : 1 }}
+                        disabled={topeAlcanzado} onClick={() => onAgregar(p)}>+</button>
+                    </div>
+                  )}
+                </div>
+                {!agotado && <div style={{ fontSize: 11, color: C.gris, marginTop: 4 }}>Quedan {p.stock}</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ---- Módulo 2: gestión de productos e inventario ---- */
+function GestionProductos({ ctx }) {
+  const { productos } = ctx;
+  const [editar, setEditar] = useState(null);
+  const [nuevo, setNuevo] = useState(false);
+  const activos = productos.filter((p) => p.disponible !== false);
+
+  return (
+    <div>
+      {activos.length === 0 && (
+        <Vacio icono="📦" titulo="Sin productos" texto="Creá tu primer producto para empezar a vender." />
+      )}
+      <div style={{ padding: "0 18px" }}>
+        {activos.map((p) => (
+          <button key={p.id} style={S.gestionCard} onClick={() => setEditar(p)}>
+            <span style={{ fontSize: 26 }}>{p.emoji || catPorC(p.categoria).icono}</span>
+            <div style={{ flex: 1, textAlign: "left", minWidth: 0 }}>
+              <div style={{ fontWeight: 700, color: C.carbon }}>{p.nombre}</div>
+              <div style={{ fontSize: 12.5, color: C.gris }}>{catPorC(p.categoria).l} · {fmtCOP(p.precio)}</div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontWeight: 800, color: p.stock <= 0 ? C.rojo : p.stock <= 3 ? C.terracota : C.verde }}>{p.stock}</div>
+              <div style={{ fontSize: 10.5, color: C.gris }}>en stock</div>
+            </div>
+          </button>
+        ))}
+      </div>
+      <button style={S.fabAncho} onClick={() => setNuevo(true)}>+ Nuevo producto</button>
+
+      {(editar || nuevo) && (
+        <FormProducto ctx={ctx} inicial={editar} onCerrar={() => { setEditar(null); setNuevo(false); }} />
+      )}
+    </div>
+  );
+}
+
+function FormProducto({ ctx, inicial, onCerrar }) {
+  const { guardarProducto } = ctx;
+  const [f, setF] = useState(inicial || {
+    nombre: "", emoji: "📦", descripcion: "", precio: "", categoria: "alimento", stock: "", disponible: true,
+  });
+  const [err, setErr] = useState({});
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+
+  const emojis = ["🦴", "🦺", "🧴", "🟢", "♻️", "🎾", "🛏️", "🍖", "🪥", "📦"];
+
+  const validar = () => {
+    const e = {};
+    if (!f.nombre.trim()) e.nombre = "Poné el nombre del producto.";
+    if (!f.precio || Number(f.precio) <= 0) e.precio = "Poné un precio válido.";
+    if (f.stock === "" || Number(f.stock) < 0) e.stock = "Poné las existencias (0 o más).";
+    setErr(e);
+    return Object.keys(e).length === 0;
+  };
+  const guardar = async () => {
+    if (!validar()) return;
+    await guardarProducto({ ...f, precio: Number(f.precio), stock: Number(f.stock) });
+    onCerrar();
+  };
+  const eliminar = async () => { await guardarProducto({ ...f, disponible: false }); onCerrar(); };
+
+  return (
+    <Modal titulo={inicial ? "Editar producto" : "Nuevo producto"} onCerrar={onCerrar}>
+      <Campo label="Nombre" error={err.nombre} obligatorio>
+        <input style={S.input} value={f.nombre} onChange={(e) => set("nombre", e.target.value)} placeholder="Ej: Snacks naturales" />
+      </Campo>
+
+      <Campo label="Ícono">
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {emojis.map((em) => (
+            <button key={em} onClick={() => set("emoji", em)}
+              style={{ ...S.emojiBtn, ...(f.emoji === em ? S.emojiBtnOn : {}) }}>{em}</button>
+          ))}
+        </div>
+      </Campo>
+
+      <Campo label="Categoría">
+        <Segmentado ops={CATEGORIAS} valor={f.categoria} onChange={(v) => set("categoria", v)} />
+      </Campo>
+
+      <Campo label="Descripción">
+        <textarea style={{ ...S.input, minHeight: 60, resize: "vertical" }} value={f.descripcion}
+          onChange={(e) => set("descripcion", e.target.value)} placeholder="Detalle breve del producto" />
+      </Campo>
+
+      <Fila>
+        <Campo label="Precio (COP)" error={err.precio} obligatorio>
+          <input style={S.input} inputMode="numeric" value={f.precio}
+            onChange={(e) => set("precio", e.target.value.replace(/[^\d]/g, ""))} placeholder="18000" />
+        </Campo>
+        <Campo label="Existencias" error={err.stock} obligatorio>
+          <input style={S.input} inputMode="numeric" value={f.stock}
+            onChange={(e) => set("stock", e.target.value.replace(/[^\d]/g, ""))} placeholder="12" />
+        </Campo>
+      </Fila>
+
+      <button style={S.btnPrimario} onClick={guardar}>{inicial ? "Guardar cambios" : "Crear producto"}</button>
+      {inicial && <button style={S.btnEliminar} onClick={eliminar}>Desactivar producto</button>}
+    </Modal>
+  );
+}
+
+/* ---- Módulos 3 y 5: carrito, checkout y confirmación ---- */
+function Checkout({ ctx, carrito, onAgregar, onQuitar, onVaciar, onListo, onCerrar }) {
+  const { productos, duenos, guardarProducto, guardarPedido } = ctx;
+  const [duenoId, setDuenoId] = useState("");
+  const [metodo, setMetodo] = useState("efectivo");
+  const [guardando, setGuardando] = useState(false);
+  const [confirmado, setConfirmado] = useState(null); // pedido guardado
+
+  const items = Object.entries(carrito)
+    .filter(([, c]) => c > 0)
+    .map(([id, c]) => ({ prod: productos.find((p) => p.id === id), cant: c }))
+    .filter((x) => x.prod);
+  const total = items.reduce((s, x) => s + x.prod.precio * x.cant, 0);
+  const dueno = duenos.find((d) => d.id === duenoId);
+
+  const metodosVisibles = METODOS.filter((m) => !m.pasarela || PASARELA_ACTIVA);
+
+  const confirmar = async () => {
+    if (!duenoId) return;
+    setGuardando(true);
+    // Descontar stock
+    await Promise.all(items.map((x) =>
+      guardarProducto({ ...x.prod, stock: Math.max(0, x.prod.stock - x.cant) })
+    ));
+    // Guardar pedido
+    const pedido = {
+      dueno_id: duenoId,
+      items: items.map((x) => ({ producto_id: x.prod.id, nombre: x.prod.nombre, precio: x.prod.precio, cantidad: x.cant })),
+      total,
+      metodo,
+      estado: "pendiente",
+    };
+    await guardarPedido(pedido);
+    setConfirmado({ ...pedido, dueno });
+    setGuardando(false);
+  };
+
+  // Pantalla de confirmación con WhatsApp
+  if (confirmado) {
+    const texto = construirConfirmacionPedido(confirmado, dueno);
+    const waUrl = dueno?.telefono
+      ? `https://wa.me/${telWa(dueno.telefono)}?text=${encodeURIComponent(texto)}`
+      : `https://wa.me/?text=${encodeURIComponent(texto)}`;
+    return (
+      <Modal titulo="¡Pedido registrado!" onCerrar={onListo}>
+        <div style={{ textAlign: "center", padding: "10px 0 18px" }}>
+          <div style={{ fontSize: 48 }}>✅</div>
+          <div style={{ fontWeight: 800, color: C.carbon, fontSize: 18, marginTop: 6 }}>Pedido de {dueno?.nombre}</div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: C.verde, marginTop: 4 }}>{fmtCOP(total)}</div>
+        </div>
+        <a href={waUrl} target="_blank" rel="noreferrer" style={S.btnWaFull}>
+          💬 Confirmar por WhatsApp{dueno?.telefono ? ` a ${dueno.nombre.split(" ")[0]}` : ""}
+        </a>
+        <button style={{ ...S.btnMiniGhost, width: "100%", marginTop: 10, minHeight: 48 }} onClick={onListo}>Listo</button>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal titulo="Tu pedido" onCerrar={onCerrar}>
+      {/* Ítems del carrito */}
+      {items.map((x) => (
+        <div key={x.prod.id} style={S.checkItem}>
+          <span style={{ fontSize: 22 }}>{x.prod.emoji || catPorC(x.prod.categoria).icono}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, color: C.carbon, fontSize: 14 }}>{x.prod.nombre}</div>
+            <div style={{ fontSize: 12, color: C.gris }}>{fmtCOP(x.prod.precio)} c/u</div>
+          </div>
+          <div style={S.stepperMini}>
+            <button style={S.stepBtn} onClick={() => onQuitar(x.prod.id)}>−</button>
+            <span style={{ fontWeight: 800, minWidth: 20, textAlign: "center" }}>{x.cant}</span>
+            <button style={{ ...S.stepBtn, opacity: x.cant >= x.prod.stock ? 0.35 : 1 }}
+              disabled={x.cant >= x.prod.stock} onClick={() => onAgregar(x.prod)}>+</button>
+          </div>
+        </div>
+      ))}
+
+      <div style={S.checkTotal}>
+        <span style={{ fontWeight: 700, color: C.gris }}>Total</span>
+        <span style={{ fontWeight: 800, color: C.verde, fontSize: 20 }}>{fmtCOP(total)}</span>
+      </div>
+
+      {/* Módulo 5: asociar a un dueño ya registrado */}
+      <Campo label="¿Para qué vecino?" obligatorio>
+        <select style={S.input} value={duenoId} onChange={(e) => setDuenoId(e.target.value)}>
+          <option value="">Seleccioná…</option>
+          {duenos.filter((d) => d.activo !== false).map((d) => (
+            <option key={d.id} value={d.id}>{d.nombre} — {d.torre_apto}</option>
+          ))}
+        </select>
+      </Campo>
+
+      <Campo label="Método de pago">
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {metodosVisibles.map((m) => (
+            <button key={m.c} onClick={() => setMetodo(m.c)}
+              style={{ ...S.segPill, ...(metodo === m.c ? S.segPillOn : {}) }}>{m.icono} {m.l}</button>
+          ))}
+        </div>
+      </Campo>
+
+      <button style={{ ...S.btnPrimario, opacity: duenoId && !guardando ? 1 : 0.5 }}
+        disabled={!duenoId || guardando} onClick={confirmar}>
+        {guardando ? "Guardando…" : "Confirmar pedido"}
+      </button>
+      <button style={S.btnEliminar} onClick={onVaciar}>Vaciar carrito</button>
+    </Modal>
+  );
+}
+
+function construirConfirmacionPedido(pedido, dueno) {
+  const nombre = dueno?.nombre?.split(" ")[0] || "";
+  const lineas = pedido.items.map((it) => `• ${it.cantidad}x ${it.nombre} — ${fmtCOP(it.precio * it.cantidad)}`).join("\n");
+  const metodo = METODOS.find((m) => m.c === pedido.metodo)?.l || pedido.metodo;
+  return `¡Hola ${nombre}! 🐾 Te confirmo tu pedido en Caninatas:
+
+${lineas}
+
+Total: ${fmtCOP(pedido.total)}
+Pago: ${metodo}
+
+Te lo llevo al apartamento apenas esté listo. ¡Gracias! 💚
+Caninatas`;
+}
+
+/* ---- Módulo 4: lista de pedidos con estados ---- */
+function ListaPedidos({ ctx }) {
+  const { pedidos, duenos, guardarPedido } = ctx;
+  const ordenados = [...pedidos].sort((a, b) => (b.fecha + b.id).localeCompare(a.fecha + a.id));
+
+  const cambiarEstado = async (pedido, estado) => {
+    await guardarPedido({ ...pedido, estado });
+  };
+
+  if (ordenados.length === 0) {
+    return <Vacio icono="🧾" titulo="Sin pedidos aún" texto="Los pedidos que registrés en el catálogo aparecen acá." />;
+  }
+
+  return (
+    <div style={{ padding: "0 18px" }}>
+      {ordenados.map((pe) => {
+        const dueno = duenos.find((d) => d.id === pe.dueno_id);
+        const est = estadoPedidoPorC(pe.estado);
+        const metodo = METODOS.find((m) => m.c === pe.metodo);
+        return (
+          <div key={pe.id} style={S.pedidoCard}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <div style={{ fontWeight: 800, color: C.carbon }}>{dueno?.nombre || "Vecino"}</div>
+                <div style={{ fontSize: 12, color: C.gris }}>{fmtFechaCorta(pe.fecha)} · {metodo?.icono} {metodo?.l}</div>
+              </div>
+              <span style={{ ...S.estadoBadge, color: est.color, background: est.bg }}>{est.l}</span>
+            </div>
+            <div style={{ margin: "8px 0", padding: "8px 0", borderTop: `1px solid ${C.borde}`, borderBottom: `1px solid ${C.borde}` }}>
+              {pe.items.map((it, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "2px 0" }}>
+                  <span style={{ color: C.carbon }}>{it.cantidad}x {it.nombre}</span>
+                  <span style={{ color: C.gris }}>{fmtCOP(it.precio * it.cantidad)}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontWeight: 800, color: C.verde }}>{fmtCOP(pe.total)}</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                {pe.estado === "pendiente" && (
+                  <button style={S.pedBtnGhost} onClick={() => cambiarEstado(pe, "entregado")}>Entregado</button>
+                )}
+                {(pe.estado === "pendiente" || pe.estado === "entregado") && (
+                  <button style={S.pedBtn} onClick={() => cambiarEstado(pe, "pagado")}>✓ Pagado</button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ======================================================================= */
 /*                                RESUMEN                                  */
 /* ======================================================================= */
 function Resumen({ ctx }) {
-  const { perros, duenos, pagos, paseos } = ctx;
+  const { perros, duenos, pagos, paseos, pedidos } = ctx;
   const per = periodoActual();
   const hoy = hoyISO();
 
@@ -1937,6 +2414,11 @@ function Resumen({ ctx }) {
   const pendientes = duenosActivos.filter((d) =>
     !pagos.find((x) => x.dueno_id === d.id && x.periodo === per && x.estado === "pagado")
   );
+
+  // Ingresos de tienda del mes (pedidos pagados)
+  const ventasTienda = (pedidos || [])
+    .filter((pe) => pe.estado === "pagado" && (pe.fecha || "").startsWith(per))
+    .reduce((s, pe) => s + (pe.total || 0), 0);
 
   const paseosHoy = paseos.filter((w) => w.fecha === hoy);
   const serviciosHoy = paseosHoy.reduce((s, w) => s + w.perro_ids.length, 0);
@@ -1963,6 +2445,12 @@ function Resumen({ ctx }) {
         <div style={{ fontSize: 13, color: C.gris, marginTop: 6 }}>
           {cobradoPct}% cobrado · {pendientes.length} pendiente{pendientes.length !== 1 ? "s" : ""}
         </div>
+        {ventasTienda > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.borde}` }}>
+            <span style={{ fontSize: 13.5, color: C.gris }}>🛍️ Ventas de tienda</span>
+            <span style={{ fontSize: 14.5, fontWeight: 800, color: C.verde }}>+{fmtCOP(ventasTienda)}</span>
+          </div>
+        )}
       </div>
 
       {/* Capacidad */}
@@ -2047,6 +2535,7 @@ function BarraPestanas({ tab, setTab }) {
     { c: "agenda", l: "Agenda", i: "📅" },
     { c: "paseos", l: "Bitácora", i: "🚶" },
     { c: "pagos", l: "Pagos", i: "💵" },
+    ...(TIENDA_ACTIVA ? [{ c: "tienda", l: "Tienda", i: "🛍️" }] : []),
     { c: "resumen", l: "Resumen", i: "📊" },
   ];
   return (
@@ -2054,8 +2543,8 @@ function BarraPestanas({ tab, setTab }) {
       {items.map((it) => (
         <button key={it.c} onClick={() => setTab(it.c)}
           style={{ ...S.tabItem, ...(tab === it.c ? S.tabItemOn : {}) }}>
-          <span style={{ fontSize: 20, filter: tab === it.c ? "none" : "grayscale(0.4)" }}>{it.i}</span>
-          <span style={{ fontSize: 10, fontWeight: tab === it.c ? 700 : 500 }}>{it.l}</span>
+          <span style={{ fontSize: 18, filter: tab === it.c ? "none" : "grayscale(0.4)" }}>{it.i}</span>
+          <span style={{ fontSize: 9.5, fontWeight: tab === it.c ? 700 : 500 }}>{it.l}</span>
         </button>
       ))}
     </div>
@@ -2219,6 +2708,26 @@ const S = {
   badgePagado: { fontSize: 12, fontWeight: 800, padding: "6px 12px", borderRadius: 20, background: C.verde + "1A", color: C.verde, whiteSpace: "nowrap" },
   badgePend: { fontSize: 12, fontWeight: 800, padding: "6px 12px", borderRadius: 20, background: C.rojo + "16", color: C.rojo, whiteSpace: "nowrap" },
 
+  // ---- Tienda (Fase 5) ----
+  prodCard: { display: "flex", gap: 12, padding: 14, borderRadius: 16, background: C.blanco, border: `1px solid ${C.borde}`, marginBottom: 10 },
+  prodEmoji: { width: 52, height: 52, borderRadius: 14, background: C.arena, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, flexShrink: 0 },
+  agotadoChip: { fontSize: 10.5, fontWeight: 800, padding: "2px 8px", borderRadius: 12, background: C.rojo + "16", color: C.rojo },
+  prodAdd: { border: "none", background: C.verde, color: C.blanco, fontWeight: 700, fontSize: 13.5, padding: "9px 18px", borderRadius: 20, cursor: "pointer" },
+  stepperMini: { display: "flex", alignItems: "center", gap: 4, background: C.arena, borderRadius: 20, padding: 3 },
+  stepBtn: { width: 32, height: 32, borderRadius: "50%", border: "none", background: C.blanco, color: C.verde, fontSize: 18, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 2px rgba(0,0,0,0.08)" },
+
+  carritoBarra: { position: "fixed", bottom: 82, left: "50%", transform: "translateX(-50%)", width: "calc(100% - 36px)", maxWidth: 364, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", borderRadius: 16, border: "none", background: C.verde, color: C.blanco, fontSize: 15, cursor: "pointer", zIndex: 40, boxShadow: "0 6px 20px rgba(47,107,79,0.4)" },
+  carritoCount: { background: C.blanco, color: C.verde, fontWeight: 800, fontSize: 13, minWidth: 24, height: 24, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 6px" },
+
+  gestionCard: { width: "100%", display: "flex", gap: 12, alignItems: "center", padding: 13, borderRadius: 14, background: C.blanco, border: `1px solid ${C.borde}`, marginBottom: 8, cursor: "pointer" },
+
+  checkItem: { display: "flex", gap: 12, alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.borde}` },
+  checkTotal: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", marginBottom: 6 },
+
+  pedidoCard: { padding: 14, borderRadius: 16, background: C.blanco, border: `1px solid ${C.borde}`, marginBottom: 10 },
+  pedBtn: { border: "none", background: C.verde, color: C.blanco, fontWeight: 700, fontSize: 12.5, padding: "8px 14px", borderRadius: 10, cursor: "pointer" },
+  pedBtnGhost: { border: `1px solid ${C.borde}`, background: C.blanco, color: C.gris, fontWeight: 700, fontSize: 12.5, padding: "8px 14px", borderRadius: 10, cursor: "pointer" },
+
   // ---- Pagos (Fase 4) ----
   finResumen: { margin: "0 18px 14px", padding: "16px 18px", borderRadius: 18, background: C.blanco, border: `1px solid ${C.borde}` },
   finBarra: { width: "100%", height: 10, borderRadius: 20, background: C.arena, overflow: "hidden" },
@@ -2356,7 +2865,9 @@ function Estilos() {
   return (
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap');
+      html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
       * { -webkit-tap-highlight-color: transparent; }
+      button, a, select, input, textarea { touch-action: manipulation; }
       @keyframes girar { to { transform: rotate(360deg); } }
       input:focus, select:focus, textarea:focus { outline: 2px solid ${C.verdeClaro}; outline-offset: 1px; }
       button:focus-visible { outline: 2px solid ${C.verde}; outline-offset: 2px; }
