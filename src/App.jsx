@@ -120,7 +120,7 @@ const ESTADOS_PEDIDO = [
 const estadoPedidoPorC = (c) => ESTADOS_PEDIDO.find((e) => e.c === c) || ESTADOS_PEDIDO[0];
 
 // Bandera de módulo: tienda (Arquitectura §4.7). Se enciende en la Fase 5.
-const TIENDA_ACTIVA = true; // config:tienda_activa
+const TIENDA_ACTIVA = false; // config:tienda_activa
 
 /* ---------------------- Utilidades ------------------------------------- */
 const uid = (p) => `${p}_${Math.random().toString(36).slice(2, 8)}`;
@@ -2543,8 +2543,8 @@ function BarraPestanas({ tab, setTab }) {
       {items.map((it) => (
         <button key={it.c} onClick={() => setTab(it.c)}
           style={{ ...S.tabItem, ...(tab === it.c ? S.tabItemOn : {}) }}>
-          <span style={{ fontSize: 18, filter: tab === it.c ? "none" : "grayscale(0.4)" }}>{it.i}</span>
-          <span style={{ fontSize: 9.5, fontWeight: tab === it.c ? 700 : 500 }}>{it.l}</span>
+          <span style={{ fontSize: 20, filter: tab === it.c ? "none" : "grayscale(0.4)" }}>{it.i}</span>
+          <span style={{ fontSize: 10.5, fontWeight: tab === it.c ? 700 : 500 }}>{it.l}</span>
         </button>
       ))}
     </div>
@@ -2635,8 +2635,8 @@ function Vacio({ icono, titulo, texto }) {
 /*                                ESTILOS                                  */
 /* ======================================================================= */
 const S = {
-  shell: { minHeight: "100vh", background: "#E6E1D6", display: "flex", justifyContent: "center", fontFamily: "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
-  frame: { width: "100%", maxWidth: 400, minHeight: "100vh", background: C.crema, position: "relative", boxShadow: "0 0 40px rgba(0,0,0,0.08)" },
+  shell: { minHeight: "100vh", background: C.crema, display: "flex", justifyContent: "center", fontFamily: "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
+  frame: { width: "100%", maxWidth: 480, minHeight: "100vh", background: C.crema, position: "relative", boxShadow: "0 0 40px rgba(0,0,0,0.08)" },
 
   header: { display: "flex", alignItems: "center", gap: 12, padding: "22px 18px 14px" },
   logo: { width: 44, height: 44, borderRadius: 14, background: C.cielo, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 },
@@ -2667,7 +2667,7 @@ const S = {
 
   // Overlay + modal
   overlay: { position: "fixed", inset: 0, background: "rgba(30,26,22,0.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 100 },
-  modal: { width: "100%", maxWidth: 400, maxHeight: "92vh", background: C.crema, borderRadius: "24px 24px 0 0", overflowY: "auto", boxShadow: "0 -6px 30px rgba(0,0,0,0.2)" },
+  modal: { width: "100%", maxWidth: 480, maxHeight: "92vh", background: C.crema, borderRadius: "24px 24px 0 0", overflowY: "auto", boxShadow: "0 -6px 30px rgba(0,0,0,0.2)" },
   modalHead: { position: "sticky", top: 0, background: C.crema, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 18px 12px", borderBottom: `1px solid ${C.borde}`, zIndex: 2 },
   modalTit: { fontSize: 19, fontWeight: 800, color: C.verde },
   cerrar: { width: 34, height: 34, borderRadius: 12, border: "none", background: C.arena, color: C.carbon, fontSize: 16, cursor: "pointer" },
@@ -2716,7 +2716,7 @@ const S = {
   stepperMini: { display: "flex", alignItems: "center", gap: 4, background: C.arena, borderRadius: 20, padding: 3 },
   stepBtn: { width: 32, height: 32, borderRadius: "50%", border: "none", background: C.blanco, color: C.verde, fontSize: 18, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 2px rgba(0,0,0,0.08)" },
 
-  carritoBarra: { position: "fixed", bottom: 82, left: "50%", transform: "translateX(-50%)", width: "calc(100% - 36px)", maxWidth: 364, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", borderRadius: 16, border: "none", background: C.verde, color: C.blanco, fontSize: 15, cursor: "pointer", zIndex: 40, boxShadow: "0 6px 20px rgba(47,107,79,0.4)" },
+  carritoBarra: { position: "fixed", bottom: 82, left: "50%", transform: "translateX(-50%)", width: "calc(100% - 36px)", maxWidth: 444, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", borderRadius: 16, border: "none", background: C.verde, color: C.blanco, fontSize: 15, cursor: "pointer", zIndex: 40, boxShadow: "0 6px 20px rgba(47,107,79,0.4)" },
   carritoCount: { background: C.blanco, color: C.verde, fontWeight: 800, fontSize: 13, minWidth: 24, height: 24, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 6px" },
 
   gestionCard: { width: "100%", display: "flex", gap: 12, alignItems: "center", padding: 13, borderRadius: 14, background: C.blanco, border: `1px solid ${C.borde}`, marginBottom: 8, cursor: "pointer" },
@@ -2765,7 +2765,7 @@ const S = {
   vacio: { textAlign: "center", padding: "40px 30px", margin: "0 18px" },
 
   // Tabbar
-  tabbar: { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 400, boxSizing: "border-box", display: "flex", background: C.blanco, borderTop: `1px solid ${C.borde}`, padding: "8px 4px calc(8px + env(safe-area-inset-bottom))", zIndex: 50, boxShadow: "0 -4px 20px rgba(0,0,0,0.06)" },
+  tabbar: { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, boxSizing: "border-box", display: "flex", background: C.blanco, borderTop: `1px solid ${C.borde}`, padding: "8px 4px calc(8px + env(safe-area-inset-bottom))", zIndex: 50, boxShadow: "0 -4px 20px rgba(0,0,0,0.06)" },
   tabItem: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "6px 0", border: "none", background: "transparent", color: C.gris, cursor: "pointer", borderRadius: 10, minWidth: 0 },
   tabItemOn: { color: C.verde, background: C.cielo + "26" },
 
@@ -2806,7 +2806,7 @@ const S = {
   btnReprogramar: { width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${C.terracota}55`, background: "transparent", color: C.terracota, fontWeight: 700, fontSize: 14, cursor: "pointer", marginTop: 10 },
 
   // ---- Detalle del perro (Fase 2) ----
-  detalleOverlay: { position: "fixed", top: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 400, height: "100vh", background: C.crema, zIndex: 80, display: "flex", flexDirection: "column" },
+  detalleOverlay: { position: "fixed", top: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, height: "100vh", background: C.crema, zIndex: 80, display: "flex", flexDirection: "column" },
   detalleTop: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 14px 10px", borderBottom: `1px solid ${C.borde}`, background: C.crema },
   volverBtn: { border: "none", background: "transparent", color: C.verde, fontWeight: 800, fontSize: 16, cursor: "pointer", padding: "6px 4px" },
   editarLink: { border: "none", background: "transparent", color: C.gris, fontWeight: 700, fontSize: 14.5, cursor: "pointer", padding: "6px 4px" },
