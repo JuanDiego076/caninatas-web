@@ -348,14 +348,168 @@ const store = {
   },
 };
 
+/* ---------------------- Capa de autenticación -------------------------- */
+// ==========================================================================
+// LOGIN (Fase B)
+// --------------------------------------------------------------------------
+// El login DE FONDO es Supabase Auth (email + enlace mágico): real, validado
+// por servidor, con sesión que persiste entre dispositivos y recargas.
+//
+// FACE ID / TOUCH ID: se implementa como "desbloqueo rápido" de la sesión,
+// usando WebAuthn a nivel de dispositivo (la API del navegador que en iPhone
+// activa Face ID). Tras entrar una vez con la cuenta, el teléfono registra
+// una passkey local; en los siguientes ingresos, el usuario desbloquea con la
+// cara sin reescribir credenciales. La sesión sigue siendo la de Supabase.
+//
+// NOTA HONESTA: Supabase Auth no trae WebAuthn/passkeys nativo "server-side".
+// Un WebAuthn completo verificado contra servidor requeriría Edge Functions
+// dedicadas. Lo aquí implementado es la combinación robusta y realista hoy:
+//   sesión real de Supabase  +  biometría de conveniencia del dispositivo.
+// El punto donde iría la verificación server-side está marcado más abajo.
+//
+// ---- CONFIGURACIÓN (fuera del código) ----
+// 1. En Supabase → Authentication → Providers → Email: activá "Email".
+//    Para enlace mágico, dejá activado "Magic Link".
+// 2. En Authentication → URL Configuration, agregá tu URL de Vercel como
+//    Site URL y como Redirect URL (ej. https://caninatas-web.vercel.app).
+// 3. En la tabla `paseadores`, cada registro debe poder vincularse a una
+//    cuenta Auth. Como los datos viven en la columna `data` (jsonb), guardamos
+//    el email del paseador en data.email y, al iniciar sesión, emparejamos por
+//    email. (Ver comentario "VINCULACIÓN" abajo.)
+// 4. Políticas RLS por rol: ver el archivo de configuración que acompaña.
+// ==========================================================================
+
+const auth = {
+  activo: !!supabase,
+
+  // Sesión actual (o null). Supabase la persiste y refresca sola.
+  async sesion() {
+    if (!supabase) return null;
+    const { data } = await supabase.auth.getSession();
+    return data?.session || null;
+  },
+
+  // Login por enlace mágico: manda un correo con un link de acceso.
+  async enviarEnlace(email) {
+    if (!supabase) return { ok: false, error: "La nube no está configurada." };
+    const { error } = await supabase.auth.signInWithOtp({
+      email: email.trim(),
+      options: { emailRedirectTo: window.location.origin },
+    });
+    if (error) return { ok: false, error: error.message };
+    return { ok: true };
+  },
+
+  // Login por contraseña (respaldo alternativo al enlace).
+  async entrarConClave(email, password) {
+    if (!supabase) return { ok: false, error: "La nube no está configurada." };
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    if (error) return { ok: false, error: error.message };
+    return { ok: true };
+  },
+
+  async salir() {
+    if (supabase) await supabase.auth.signOut();
+    limpiarPasskeyLocal();
+  },
+
+  // Reacciona a cambios de sesión (login/logout desde cualquier pestaña).
+  alCambiar(callback) {
+    if (!supabase) return () => {};
+    const { data } = supabase.auth.onAuthStateChange((_e, session) => callback(session));
+    return () => data?.subscription?.unsubscribe?.();
+  },
+};
+
+/* ---- Face ID / Touch ID vía WebAuthn (a nivel de dispositivo) ---- */
+// Guardamos localmente una marca de "passkey registrada" por email, para
+// ofrecer el desbloqueo biométrico en los siguientes ingresos.
+const KEY_PASSKEY = "caninatas:passkey";
+
+const soportaWebAuthn = () =>
+  typeof window !== "undefined" &&
+  window.PublicKeyCredential !== undefined &&
+  typeof navigator.credentials?.create === "function";
+
+async function soportaBiometria() {
+  if (!soportaWebAuthn()) return false;
+  try {
+    return await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+  } catch (e) { return false; }
+}
+
+function passkeyGuardada(email) {
+  try {
+    const raw = localStorage.getItem(KEY_PASSKEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    return o.email === email ? o : null;
+  } catch (e) { return null; }
+}
+function limpiarPasskeyLocal() {
+  try { localStorage.removeItem(KEY_PASSKEY); } catch (e) {}
+}
+
+// Registra una passkey en el dispositivo tras un login exitoso.
+async function registrarPasskey(email) {
+  if (!(await soportaBiometria())) return { ok: false, error: "Este dispositivo no tiene Face ID/Touch ID disponible." };
+  try {
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const userId = crypto.getRandomValues(new Uint8Array(16));
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge,
+        rp: { name: "Caninatas" },
+        user: { id: userId, name: email, displayName: email },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+        authenticatorSelection: { userVerification: "required", authenticatorAttachment: "platform" },
+        timeout: 60000,
+      },
+    });
+    if (!cred) return { ok: false, error: "No se pudo registrar." };
+    // Guardamos el id de la credencial para volver a pedirla luego.
+    const credId = btoa(String.fromCharCode(...new Uint8Array(cred.rawId)));
+    localStorage.setItem(KEY_PASSKEY, JSON.stringify({ email, credId }));
+    // >>> Aquí iría el envío del attestation a una Edge Function de Supabase
+    //     para verificación server-side (WebAuthn completo). Fuera de alcance.
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "No se completó el registro biométrico." };
+  }
+}
+
+// Desbloquea con Face ID: pide la passkey del dispositivo.
+// (La sesión de Supabase ya existe y persiste; esto es la verificación local.)
+async function desbloquearConBiometria(email) {
+  const guardada = passkeyGuardada(email);
+  if (!guardada) return { ok: false, error: "No hay Face ID configurado en este teléfono." };
+  try {
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const rawId = Uint8Array.from(atob(guardada.credId), (c) => c.charCodeAt(0));
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge,
+        allowCredentials: [{ type: "public-key", id: rawId }],
+        userVerification: "required",
+        timeout: 60000,
+      },
+    });
+    if (!assertion) return { ok: false, error: "No se reconoció." };
+    // >>> Aquí iría la verificación del assertion contra la Edge Function.
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "No pudimos verificar tu Face ID." };
+  }
+}
+
 /* ---------------------- Datos de ejemplo -------------------------------- */
 function datosEjemplo() {
   const d1 = uid("d"), d2 = uid("d"), d3 = uid("d");
   const p1 = uid("p"), p2 = uid("p"), p3 = uid("p");
   const ps1 = uid("ps"), ps2 = uid("ps"); // paseadores
   const paseadores = [
-    { id: ps1, nombre: "Juan Diego", rol: "admin", telefono: "3001112233", torre_apto: "Torre 3 · Apto 502", activo: true, es_fundador: true },
-    { id: ps2, nombre: "Camilo", rol: "paseador", telefono: "3004445566", torre_apto: "Torre 1 · Apto 101", activo: true },
+    { id: ps1, nombre: "Juan Diego", rol: "admin", telefono: "3001112233", torre_apto: "Torre 3 · Apto 502", email: "juandiego@ejemplo.com", activo: true, es_fundador: true },
+    { id: ps2, nombre: "Camilo", rol: "paseador", telefono: "3004445566", torre_apto: "Torre 1 · Apto 101", email: "camilo@ejemplo.com", activo: true },
   ];
   const duenos = [
     { id: d1, nombre: "Laura Restrepo", torre_apto: "Torre 3 · Apto 502", telefono: "3001234567", plan: "grupal_3x", activo: true },
@@ -419,6 +573,16 @@ export default function App() {
   const [plantillas, setPlantillas] = useState([]);
   const [usuarioActivoId, setUsuarioActivoId] = useState(null); // quién está viendo la app
   const [migracion, setMigracion] = useState(null); // {claves:[], estado:'ofrecer'|'migrando'|'listo'} | null
+  const [sesion, setSesion] = useState(undefined); // undefined=cargando, null=sin login, obj=logueado
+  const [supervisar, setSupervisar] = useState(false); // admin usando "Viendo como"
+
+  // Escucha la sesión de Supabase (login/logout/refresh)
+  useEffect(() => {
+    if (!auth.activo) { setSesion(null); return; } // sin nube: no hay login
+    auth.sesion().then((s) => setSesion(s));
+    const off = auth.alCambiar((s) => setSesion(s));
+    return off;
+  }, []);
 
   /* -------- Carga inicial -------- */
   useEffect(() => {
@@ -654,21 +818,40 @@ export default function App() {
     return { ok: true };
   };
 
-  // Usuario activo y permisos
-  const usuarioActivo = paseadores.find((p) => p.id === usuarioActivoId) || null;
-  const esAdmin = !MULTIPASEADOR_ACTIVO || !usuarioActivo || usuarioActivo.rol === "admin";
+  // Usuario activo y permisos.
+  // Con login activo: el usuario es el paseador cuyo email coincide con la sesión.
+  // El rol viene de la base de datos, no de un selector.
+  const emailSesion = sesion?.user?.email?.toLowerCase() || null;
+  const paseadorDeSesion = emailSesion
+    ? paseadores.find((p) => (p.email || "").toLowerCase() === emailSesion) || null
+    : null;
+
+  // Sin nube (auth inactivo) se mantiene el comportamiento anterior por compatibilidad.
+  const usuarioAutenticado = auth.activo ? paseadorDeSesion : (paseadores.find((p) => p.id === usuarioActivoId) || null);
+  const adminAutenticado = usuarioAutenticado?.rol === "admin";
+
+  // El admin puede "supervisar" (ver como otro paseador). Nunca al revés.
+  const usuarioActivo = (adminAutenticado && supervisar && usuarioActivoId)
+    ? (paseadores.find((p) => p.id === usuarioActivoId) || usuarioAutenticado)
+    : usuarioAutenticado;
+
+  const esAdmin = !MULTIPASEADOR_ACTIVO
+    ? true
+    : (adminAutenticado && !(supervisar && usuarioActivo && usuarioActivo.rol !== "admin"));
+
+  const idActivo = usuarioActivo?.id || null;
 
   // Filtros por rol: el admin ve todo; el paseador solo lo suyo
-  const perrosVisibles = esAdmin ? perros : perros.filter((p) => p.paseador_id === usuarioActivoId);
-  const paseosVisibles = esAdmin ? paseos : paseos.filter((w) => w.paseador_id === usuarioActivoId);
-
-  // Plantillas visibles por rol
-  const plantillasVisibles = esAdmin ? plantillas : plantillas.filter((pl) => pl.paseador_id === usuarioActivoId);
+  const perrosVisibles = esAdmin ? perros : perros.filter((p) => p.paseador_id === idActivo);
+  const paseosVisibles = esAdmin ? paseos : paseos.filter((w) => w.paseador_id === idActivo);
+  const plantillasVisibles = esAdmin ? plantillas : plantillas.filter((pl) => pl.paseador_id === idActivo);
 
   const ctx = {
     duenos, perros, pagos, paseos, productos, pedidos, paseadores, plantillas,
     perrosVisibles, paseosVisibles, plantillasVisibles,
-    usuarioActivo, usuarioActivoId, setUsuarioActivoId, esAdmin,
+    usuarioActivo, usuarioActivoId: idActivo, setUsuarioActivoId, esAdmin,
+    adminAutenticado, supervisar, setSupervisar, sesion,
+    cerrarSesion: async () => { await auth.salir(); setSupervisar(false); },
     guardarPerro, guardarDueno, guardarPaseo, guardarPago, guardarProducto, guardarPedido, guardarPaseador, guardarPlantilla, recargar,
     abrirDetalle: (id) => setPerroDetalleId(id),
     cerrarDetalle: () => setPerroDetalleId(null),
@@ -715,6 +898,44 @@ export default function App() {
     );
   }
 
+  // Pantalla de login: si hay nube configurada y no hay sesión, pedir ingreso.
+  if (auth.activo && sesion === null) {
+    return (
+      <Shell>
+        <PantallaLogin paseadores={paseadores} />
+        <Estilos />
+      </Shell>
+    );
+  }
+  // Esperando saber si hay sesión (evita parpadeo)
+  if (auth.activo && sesion === undefined) {
+    return (
+      <Shell>
+        <div style={{ ...S.centro, height: "80vh", flexDirection: "column", gap: 14 }}>
+          <div style={S.spinner} />
+          <div style={{ color: C.gris, fontSize: 15 }}>Un momento…</div>
+        </div>
+        <Estilos />
+      </Shell>
+    );
+  }
+  // Con sesión pero sin perfil de paseador vinculado: avisar
+  if (auth.activo && sesion && paseadores.length > 0 && !usuarioAutenticado) {
+    return (
+      <Shell>
+        <div style={{ padding: "40px 24px", textAlign: "center", minHeight: "80vh", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", gap: 16 }}>
+          <img src={LOGO_CANINATAS} alt="Caninatas" style={{ width: 72, height: 72, borderRadius: "50%" }} />
+          <div style={{ fontSize: 20, fontWeight: 800, color: C.verde }}>Tu correo no está en el equipo todavía</div>
+          <div style={{ fontSize: 14.5, color: C.carbon, lineHeight: 1.5, maxWidth: 320 }}>
+            Entraste con <b>{sesion.user.email}</b>, pero ese correo no está vinculado a ningún paseador. Pedile al administrador que te registre con este mismo correo. 🐾
+          </div>
+          <button style={{ ...S.btnMiniGhost, maxWidth: 240, width: "100%", minHeight: 48 }} onClick={() => auth.salir()}>Cerrar sesión</button>
+        </div>
+        <Estilos />
+      </Shell>
+    );
+  }
+
   return (
     <Shell>
       {error && (
@@ -724,9 +945,11 @@ export default function App() {
         </div>
       )}
 
-      {MULTIPASEADOR_ACTIVO && paseadores.length > 1 && (
+      {MULTIPASEADOR_ACTIVO && (adminAutenticado || (!auth.activo && paseadores.length > 1)) && (
         <SelectorUsuario ctx={ctx} />
       )}
+
+      {auth.activo && sesion && <BarraSesion ctx={ctx} email={sesion.user.email} />}
 
       <div style={{ paddingBottom: 96 }}>
         {tab === "manada" && <Manada ctx={ctx} />}
@@ -2788,20 +3011,72 @@ function ListaPedidos({ ctx }) {
 /* ======================================================================= */
 
 /* Selector de usuario activo: permite al fundador simular cada vista */
+/* Barra de sesión: quién está logueado, configurar Face ID y cerrar sesión */
+function BarraSesion({ ctx, email }) {
+  const { cerrarSesion, usuarioActivo } = ctx;
+  const [bioOfrecer, setBioOfrecer] = useState(false);
+  const [bioListo, setBioListo] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      if (await soportaBiometria()) {
+        const ya = passkeyGuardada(email);
+        if (ya) setBioListo(true);
+        else setBioOfrecer(true);
+      }
+    })();
+  }, [email]);
+
+  const configurarBio = async () => {
+    const r = await registrarPasskey(email);
+    if (r.ok) { setBioListo(true); setBioOfrecer(false); setMsg("¡Listo! La próxima vez entrás con tu cara 🐾"); setTimeout(() => setMsg(""), 3000); }
+    else setMsg(r.error || "No se pudo configurar.");
+  };
+
+  return (
+    <div style={S.barraSesion}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+        <span style={{ fontSize: 16 }}>{usuarioActivo ? rolPorC(usuarioActivo.rol).icono : "🐾"}</span>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: C.carbon, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {usuarioActivo?.nombre || email}
+          </div>
+          {bioListo && <div style={{ fontSize: 10.5, color: C.verde }}>Face ID activo</div>}
+        </div>
+      </div>
+      {bioOfrecer && (
+        <button style={S.bioBtn} onClick={configurarBio}>Activar Face ID</button>
+      )}
+      <button style={S.salirBtn} onClick={cerrarSesion}>Salir</button>
+      {msg && <div style={{ ...S.avisoInfo, position: "absolute", top: 44, left: 12, right: 12, zIndex: 5 }}>{msg}</div>}
+    </div>
+  );
+}
+
 function SelectorUsuario({ ctx }) {
-  const { paseadores, usuarioActivoId, setUsuarioActivoId } = ctx;
+  const { paseadores, usuarioActivoId, setUsuarioActivoId, adminAutenticado, supervisar, setSupervisar } = ctx;
+  // Solo el admin autenticado puede supervisar. Si no hay auth (modo local), se comporta como antes.
+  if (auth.activo && !adminAutenticado) return null;
   const activos = paseadores.filter((p) => p.activo !== false);
-  const actual = activos.find((p) => p.id === usuarioActivoId);
 
   return (
     <div style={S.selectorUsuario}>
-      <span style={{ fontSize: 12, color: C.gris, fontWeight: 700 }}>Viendo como:</span>
-      <select style={S.selectorSelect} value={usuarioActivoId || ""}
-        onChange={(e) => setUsuarioActivoId(e.target.value)}>
-        {activos.map((p) => (
-          <option key={p.id} value={p.id}>{rolPorC(p.rol).icono} {p.nombre} · {rolPorC(p.rol).l}</option>
-        ))}
-      </select>
+      <span style={{ fontSize: 12, color: C.gris, fontWeight: 700 }}>👁️ Supervisión:</span>
+      {supervisar ? (
+        <>
+          <select style={S.selectorSelect} value={usuarioActivoId || ""}
+            onChange={(e) => setUsuarioActivoId(e.target.value)}>
+            <option value="">Todo el equipo (admin)</option>
+            {activos.filter((p) => p.rol !== "admin").map((p) => (
+              <option key={p.id} value={p.id}>{rolPorC(p.rol).icono} Ver como {p.nombre}</option>
+            ))}
+          </select>
+          <button style={S.superSalir} onClick={() => { setSupervisar(false); setUsuarioActivoId(null); }}>Salir</button>
+        </>
+      ) : (
+        <button style={S.superEntrar} onClick={() => setSupervisar(true)}>Ver como otro paseador</button>
+      )}
     </div>
   );
 }
@@ -2959,7 +3234,7 @@ function GestionPaseadores({ ctx }) {
 function FormPaseador({ ctx, inicial, onCerrar }) {
   const { guardarPaseador } = ctx;
   const [f, setF] = useState(inicial || {
-    nombre: "", rol: "paseador", telefono: "", torre_apto: "", activo: true,
+    nombre: "", rol: "paseador", telefono: "", torre_apto: "", email: "", activo: true,
   });
   const [err, setErr] = useState({});
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
@@ -3004,6 +3279,11 @@ function FormPaseador({ ctx, inicial, onCerrar }) {
         <input style={S.input} inputMode="numeric" value={f.telefono}
           onChange={(e) => set("telefono", e.target.value.replace(/[^\d]/g, ""))} placeholder="3004445566" />
       </Campo>
+      <Campo label="Correo (para iniciar sesión)">
+        <input style={S.input} type="email" inputMode="email" value={f.email || ""}
+          onChange={(e) => set("email", e.target.value)} placeholder="camilo@ejemplo.com" />
+      </Campo>
+      <div style={S.avisoInfo}>El paseador inicia sesión con este correo. Debe coincidir con el que use para entrar. 🐾</div>
       <Campo label="Torre y apartamento">
         <input style={S.input} value={f.torre_apto} onChange={(e) => set("torre_apto", e.target.value)} placeholder="Torre 1 · Apto 101" />
       </Campo>
@@ -3174,6 +3454,133 @@ function Resumen({ ctx }) {
       <HistorialPaseosResumen ctx={ctx} />
 
       <div style={{ height: 10 }} />
+    </div>
+  );
+}
+
+/* ======================================================================= */
+/*                          PANTALLA DE LOGIN (Fase B)                     */
+/* ======================================================================= */
+function PantallaLogin({ paseadores }) {
+  const [modo, setModo] = useState("elegir"); // elegir | enlace | clave | biometria
+  const [email, setEmail] = useState("");
+  const [clave, setClave] = useState("");
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  const [cargando, setCargando] = useState(false);
+  const [bioDisponible, setBioDisponible] = useState(false);
+  const [emailBio, setEmailBio] = useState(null);
+
+  // ¿Hay biometría configurada en este dispositivo?
+  useEffect(() => {
+    (async () => {
+      if (await soportaBiometria()) {
+        try {
+          const raw = localStorage.getItem(KEY_PASSKEY);
+          if (raw) {
+            const o = JSON.parse(raw);
+            setEmailBio(o.email);
+            setBioDisponible(true);
+            setModo("biometria");
+          }
+        } catch (e) {}
+      }
+    })();
+  }, []);
+
+  const enviarEnlace = async () => {
+    if (!email.trim()) { setErr("Escribí tu correo."); return; }
+    setCargando(true); setErr(""); setMsg("");
+    const r = await auth.enviarEnlace(email);
+    setCargando(false);
+    if (r.ok) setMsg("¡Listo! Te mandamos un enlace al correo. Abrilo desde este teléfono para entrar. 📩");
+    else setErr(r.error || "No pudimos enviar el enlace.");
+  };
+
+  const entrarClave = async () => {
+    if (!email.trim() || !clave) { setErr("Completá correo y contraseña."); return; }
+    setCargando(true); setErr("");
+    const r = await auth.entrarConClave(email, clave);
+    setCargando(false);
+    if (!r.ok) setErr(r.error || "Correo o contraseña incorrectos.");
+    // Si ok, el listener de sesión hace el resto y esta pantalla desaparece.
+  };
+
+  const entrarBiometria = async () => {
+    setCargando(true); setErr("");
+    const r = await desbloquearConBiometria(emailBio);
+    setCargando(false);
+    if (r.ok) {
+      // La sesión de Supabase ya está viva (persistió). Forzamos revalidación.
+      const s = await auth.sesion();
+      if (!s) {
+        setErr("Tu sesión expiró. Entrá con tu correo una vez más.");
+        setModo("elegir");
+      }
+      // Si hay sesión, el componente padre ya la detecta y muestra la app.
+    } else {
+      setErr(r.error || "No pudimos verificar tu Face ID.");
+    }
+  };
+
+  return (
+    <div style={S.loginWrap}>
+      <img src={LOGO_CANINATAS} alt="Caninatas" style={S.loginLogo} />
+      <div style={S.loginTitulo}>Caninatas</div>
+
+      {modo === "biometria" && bioDisponible ? (
+        <>
+          <div style={S.loginSub}>¿Sos vos? Entrá con tu cara 🐾</div>
+          <button style={S.btnPrimario} disabled={cargando} onClick={entrarBiometria}>
+            {cargando ? "Verificando…" : "Entrar con Face ID"}
+          </button>
+          <button style={S.loginLink} onClick={() => { setModo("elegir"); setErr(""); }}>
+            Entrar con correo
+          </button>
+        </>
+      ) : modo === "enlace" ? (
+        <>
+          <div style={S.loginSub}>¿Quién sos? Poné tu correo y te mandamos el enlace de acceso.</div>
+          <input style={S.input} type="email" inputMode="email" placeholder="tucorreo@ejemplo.com"
+            value={email} onChange={(e) => setEmail(e.target.value)} />
+          <button style={S.btnPrimario} disabled={cargando} onClick={enviarEnlace}>
+            {cargando ? "Enviando…" : "Enviar enlace mágico"}
+          </button>
+          <button style={S.loginLink} onClick={() => { setModo("clave"); setErr(""); setMsg(""); }}>
+            Prefiero usar contraseña
+          </button>
+          <button style={S.loginLink} onClick={() => { setModo("elegir"); setErr(""); setMsg(""); }}>Volver</button>
+        </>
+      ) : modo === "clave" ? (
+        <>
+          <div style={S.loginSub}>Entrá con tu correo y contraseña.</div>
+          <input style={S.input} type="email" inputMode="email" placeholder="tucorreo@ejemplo.com"
+            value={email} onChange={(e) => setEmail(e.target.value)} />
+          <input style={{ ...S.input, marginTop: 8 }} type="password" placeholder="Contraseña"
+            value={clave} onChange={(e) => setClave(e.target.value)} />
+          <button style={S.btnPrimario} disabled={cargando} onClick={entrarClave}>
+            {cargando ? "Entrando…" : "Entrar"}
+          </button>
+          <button style={S.loginLink} onClick={() => { setModo("enlace"); setErr(""); }}>
+            Mejor mandame un enlace al correo
+          </button>
+        </>
+      ) : (
+        <>
+          <div style={S.loginSub}>Entrá para ver tu manada 🐾</div>
+          <button style={S.btnPrimario} onClick={() => { setModo("enlace"); setErr(""); }}>
+            Entrar con mi correo
+          </button>
+          {bioDisponible && (
+            <button style={S.btnMiniGhost} onClick={() => setModo("biometria")}>Entrar con Face ID</button>
+          )}
+        </>
+      )}
+
+      {msg && <div style={{ ...S.avisoInfo, marginTop: 14 }}>{msg}</div>}
+      {err && <div style={{ ...S.avisoPeligro, marginTop: 14 }}>{err}</div>}
+
+      <div style={S.loginPie}>Paseos caninos · Buenos Aires, Medellín</div>
     </div>
   );
 }
@@ -3387,6 +3794,20 @@ const S = {
   // ---- Multi-paseador (Fase 6) ----
   selectorUsuario: { display: "flex", alignItems: "center", gap: 10, margin: "10px 18px 0", padding: "8px 12px", borderRadius: 12, background: C.cielo + "33", border: `1px solid ${C.cielo}` },
   selectorSelect: { flex: 1, border: "none", background: "transparent", fontSize: 13.5, fontWeight: 700, color: C.carbon, fontFamily: "inherit", cursor: "pointer", minHeight: 32 },
+  superEntrar: { border: "none", background: "transparent", color: C.verde, fontWeight: 700, fontSize: 12.5, cursor: "pointer", padding: "4px 6px" },
+  superSalir: { border: "none", background: C.arena, color: C.gris, fontWeight: 700, fontSize: 12, cursor: "pointer", padding: "6px 10px", borderRadius: 8 },
+
+  // ---- Login y sesión (Fase B) ----
+  loginWrap: { minHeight: "88vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "24px 28px", textAlign: "center", gap: 12 },
+  loginLogo: { width: 96, height: 96, borderRadius: "50%", boxShadow: "0 4px 16px rgba(0,0,0,0.1)" },
+  loginTitulo: { fontSize: 30, fontWeight: 800, color: C.verde, letterSpacing: "-0.02em", marginTop: 4 },
+  loginSub: { fontSize: 15, color: C.carbon, lineHeight: 1.5, maxWidth: 300, marginBottom: 8 },
+  loginLink: { border: "none", background: "transparent", color: C.verde, fontWeight: 700, fontSize: 13.5, cursor: "pointer", padding: "8px 4px" },
+  loginPie: { position: "absolute", bottom: "calc(20px + env(safe-area-inset-bottom))", fontSize: 12, color: C.gris },
+
+  barraSesion: { position: "relative", display: "flex", alignItems: "center", gap: 8, margin: "10px 18px 0", padding: "8px 12px", borderRadius: 12, background: C.arena, border: `1px solid ${C.borde}` },
+  bioBtn: { border: "none", background: C.cielo, color: "#1C5566", fontWeight: 700, fontSize: 12, cursor: "pointer", padding: "7px 11px", borderRadius: 9, whiteSpace: "nowrap" },
+  salirBtn: { border: `1px solid ${C.borde}`, background: C.blanco, color: C.gris, fontWeight: 700, fontSize: 12, cursor: "pointer", padding: "7px 12px", borderRadius: 9 },
   paseadorCard: { padding: 14, borderRadius: 16, background: C.blanco, border: `1px solid ${C.borde}`, marginBottom: 10 },
   paseadorFila: { display: "flex", gap: 12, alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.crema}` },
   paseadorAvatar: { width: 44, height: 44, borderRadius: 14, background: C.arena, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 },
