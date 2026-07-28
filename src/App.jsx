@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { createClient } from "@supabase/supabase-js";
 
 /* =========================================================================
    CANINATAS · Registro y Control de la Manada · Fase 1
@@ -62,12 +63,17 @@ const PLANES = [
 const planPorCodigo = (c) => PLANES.find((p) => p.c === c);
 
 const RONDAS = [
-  { c: "ronda1", l: "Ronda 1 · 6:30–8:30 a.m.", corta: "R1 · mañana", hini: "06:30", hfin: "08:30" },
-  { c: "ronda2", l: "Ronda 2 · 9:00–11:00 a.m.", corta: "R2 · media mañana", hini: "09:00", hfin: "11:00" },
-  { c: "ronda3", l: "Ronda 3 · 3:30–5:30 p.m.", corta: "R3 · tarde", hini: "15:30", hfin: "17:30" },
-  { c: "ronda4", l: "Ronda 4 · 6:00–7:30 p.m.", corta: "R4 · noche", hini: "18:00", hfin: "19:30" },
+  { c: "ronda1", l: "Ronda 1 · 6:00–7:30 a.m.", corta: "R1 · mañana", hini: "06:00", hfin: "07:30" },
+  { c: "ronda2", l: "Ronda 2 · 8:00–9:30 a.m.", corta: "R2 · media mañana", hini: "08:00", hfin: "09:30" },
+  { c: "ronda3", l: "Ronda 3 · 10:00–11:30 a.m.", corta: "R3 · antes de mediodía", hini: "10:00", hfin: "11:30" },
+  // Pausa de calor 11:30 a.m. – 2:00 p.m. (se muestra entre R3 y R4)
+  { c: "ronda4", l: "Ronda 4 · 2:00–3:30 p.m.", corta: "R4 · primera tarde", hini: "14:00", hfin: "15:30" },
+  { c: "ronda5", l: "Ronda 5 · 4:00–5:30 p.m.", corta: "R5 · tarde", hini: "16:00", hfin: "17:30" },
+  { c: "ronda6", l: "Ronda 6 · 6:00–7:30 p.m.", corta: "R6 · noche", hini: "18:00", hfin: "19:30" },
 ];
 const rondaPorC = (c) => RONDAS.find((r) => r.c === c);
+// Índice tras el cual va la pausa de calor (después de Ronda 3)
+const IDX_PAUSA = 3;
 
 // Estados del paseo (Arquitectura §3)
 const ESTADOS = [
@@ -79,7 +85,7 @@ const ESTADOS = [
 ];
 const estadoPorC = (c) => ESTADOS.find((e) => e.c === c) || ESTADOS[0];
 
-const CAPACIDAD_DIA = 20;   // techo de servicios/día (§4.5)
+const CAPACIDAD_DIA = 24;   // techo de servicios/día (6 rondas × 4 cupos)
 const CUPO_RONDA = 4;       // máx perros por grupo = cupo por ronda con un paseador (§4.3)
 
 // Métodos de pago (Arquitectura §3) — 'pasarela' queda listo pero apagado
@@ -121,6 +127,16 @@ const estadoPedidoPorC = (c) => ESTADOS_PEDIDO.find((e) => e.c === c) || ESTADOS
 
 // Bandera de módulo: tienda (Arquitectura §4.7). Se enciende en la Fase 5.
 const TIENDA_ACTIVA = false; // config:tienda_activa
+
+// Roles de paseador (Arquitectura §3)
+const ROLES = [
+  { c: "admin", l: "Administrador", desc: "Ve y gestiona todo", icono: "👑" },
+  { c: "paseador", l: "Paseador", desc: "Ve y registra solo lo suyo", icono: "🚶" },
+];
+const rolPorC = (c) => ROLES.find((r) => r.c === c) || ROLES[1];
+
+// Bandera de módulo: multi-paseador (Arquitectura §4.7). Se enciende en la Fase 6.
+const MULTIPASEADOR_ACTIVO = true; // config:multipaseador_activo
 
 /* ---------------------- Utilidades ------------------------------------- */
 const uid = (p) => `${p}_${Math.random().toString(36).slice(2, 8)}`;
@@ -198,30 +214,137 @@ const semanaDesde = (lunesISO) => Array.from({ length: 7 }, (_, i) => sumarDias(
 const etiquetaDia = (iso) => `${DIAS_CORTO[diaSemana(iso)]} ${Number(iso.split("-")[2])}`;
 
 /* ---------------------- Capa de almacenamiento ------------------------- */
-// Claves jerárquicas (Arquitectura §5). Persiste en localStorage (navegador).
-// Plan B en memoria por si localStorage falla (ej. modo privado de Safari).
+// ==========================================================================
+// PERSISTENCIA EN SUPABASE (Fase A · Escenario B)
+// --------------------------------------------------------------------------
+// La app siempre habló con un objeto `store` de interfaz get/set/list.
+// Antes ese store escribía en localStorage; ahora escribe en Supabase.
+// El RESTO DE LA APP NO CAMBIA: mismas funciones, mismas claves jerárquicas.
+//
+// Cada prefijo de clave (ej. "perros:", "paseos:") es una TABLA en Supabase.
+// Cada fila guarda:
+//   - store_key (text, PRIMARY KEY): la clave jerárquica original de la app
+//                (ej. "paseos:2026-07-27:w_ab12"). Es única y permite que
+//                get(key) y list(prefix) funcionen igual que antes.
+//   - data (jsonb): el objeto completo del registro, tal cual lo maneja la app.
+//
+// Ventaja: es un TRASLADO, no un rediseño. Los campos y relaciones internas
+// (dueno_id, paseador_id, perro_ids…) viven dentro de `data` sin tocarse.
+//
+// ---- CONFIGURACIÓN (fuera del código) ----
+// 1. Creá un proyecto en https://supabase.com
+// 2. En Project Settings → API, copiá la Project URL y la clave pública `anon`.
+// 3. Ponelas en variables de entorno de tu proyecto Vite:
+//      VITE_SUPABASE_URL=https://xxxxx.supabase.co
+//      VITE_SUPABASE_ANON_KEY=eyJhbGciOi...
+//    (en Vercel se configuran en Settings → Environment Variables)
+// 4. Instalá la librería:  npm install @supabase/supabase-js
+// 5. Creá las 8 tablas (ver bloque SQL al final de este archivo, en comentarios).
+//
+// NOTA: la clave `anon` es pública por diseño; NO es un secreto. La seguridad
+// real vendrá de las políticas RLS + Auth en la Fase B. Por ahora, sin Auth,
+// las tablas quedan abiertas (útil para migrar y probar).
+// ==========================================================================
+
+const SUPABASE_URL = import.meta.env?.VITE_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = import.meta.env?.VITE_SUPABASE_ANON_KEY || "";
+
+// Cliente único. Si faltan las variables, queda null y la app cae a localStorage.
+const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
+// Mapa prefijo → nombre de tabla. El prefijo es lo que va antes del primer ":".
+const TABLA_POR_PREFIJO = {
+  duenos: "duenos",
+  perros: "perros",
+  paseadores: "paseadores",
+  paseos: "paseos",
+  pagos: "pagos",
+  plantillas: "plantillas",
+  productos: "productos",
+  pedidos: "pedidos",
+  config: "config", // banderas internas (sembrado, migración…)
+};
+const prefijoDe = (key) => key.split(":")[0];
+const tablaDe = (key) => TABLA_POR_PREFIJO[prefijoDe(key)] || null;
+
+// Plan B: memoria + localStorage, por si Supabase no está configurado o falla.
 const memStore = {};
-const store = {
+const localStore = {
   async set(key, value) {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-      return true;
-    } catch (e) { /* cae a memoria */ }
-    memStore[key] = JSON.stringify(value);
-    return true;
+    try { localStorage.setItem(key, JSON.stringify(value)); return true; }
+    catch (e) { memStore[key] = JSON.stringify(value); return true; }
   },
   async get(key) {
-    try {
-      const r = localStorage.getItem(key);
-      return r ? JSON.parse(r) : null;
-    } catch (e) { /* cae a memoria */ }
-    return memStore[key] ? JSON.parse(memStore[key]) : null;
+    try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : null; }
+    catch (e) { return memStore[key] ? JSON.parse(memStore[key]) : null; }
   },
   async list(prefix) {
-    try {
-      return Object.keys(localStorage).filter((k) => k.startsWith(prefix));
-    } catch (e) { /* cae a memoria */ }
-    return Object.keys(memStore).filter((k) => k.startsWith(prefix));
+    try { return Object.keys(localStorage).filter((k) => k.startsWith(prefix)); }
+    catch (e) { return Object.keys(memStore).filter((k) => k.startsWith(prefix)); }
+  },
+};
+
+// Store de Supabase con la MISMA interfaz get/set/list.
+// Si supabase es null (sin config), delega en localStore para no romper la app.
+const store = {
+  usandoNube: !!supabase,
+
+  async set(key, value) {
+    if (!supabase) return localStore.set(key, value);
+    const tabla = tablaDe(key);
+    if (!tabla) return localStore.set(key, value);
+    const { error } = await supabase
+      .from(tabla)
+      .upsert({ store_key: key, data: value }, { onConflict: "store_key" });
+    if (error) { console.error("Supabase set", key, error.message); throw error; }
+    return true;
+  },
+
+  async get(key) {
+    if (!supabase) return localStore.get(key);
+    const tabla = tablaDe(key);
+    if (!tabla) return localStore.get(key);
+    const { data, error } = await supabase
+      .from(tabla)
+      .select("data")
+      .eq("store_key", key)
+      .maybeSingle();
+    if (error) { console.error("Supabase get", key, error.message); throw error; }
+    return data ? data.data : null;
+  },
+
+  // list(prefix): devuelve las CLAVES (store_key) que empiezan con el prefijo,
+  // igual que antes. La app luego hace get() de cada una.
+  async list(prefix) {
+    if (!supabase) return localStore.list(prefix);
+    const tabla = tablaDe(prefix);
+    if (!tabla) return localStore.list(prefix);
+    const { data, error } = await supabase
+      .from(tabla)
+      .select("store_key")
+      .like("store_key", `${prefix}%`);
+    if (error) { console.error("Supabase list", prefix, error.message); throw error; }
+    return (data || []).map((r) => r.store_key);
+  },
+
+  // Optimización: trae todas las filas de una tabla de una sola vez (clave+data),
+  // para no hacer N peticiones. La usa la carga inicial.
+  async listaCompleta(prefix) {
+    if (!supabase) {
+      const keys = await localStore.list(prefix);
+      const items = await Promise.all(keys.map((k) => localStore.get(k)));
+      return items.filter(Boolean);
+    }
+    const tabla = tablaDe(prefix);
+    if (!tabla) return [];
+    const { data, error } = await supabase
+      .from(tabla)
+      .select("data")
+      .like("store_key", `${prefix}%`);
+    if (error) { console.error("Supabase listaCompleta", prefix, error.message); throw error; }
+    return (data || []).map((r) => r.data);
   },
 };
 
@@ -229,15 +352,20 @@ const store = {
 function datosEjemplo() {
   const d1 = uid("d"), d2 = uid("d"), d3 = uid("d");
   const p1 = uid("p"), p2 = uid("p"), p3 = uid("p");
+  const ps1 = uid("ps"), ps2 = uid("ps"); // paseadores
+  const paseadores = [
+    { id: ps1, nombre: "Juan Diego", rol: "admin", telefono: "3001112233", torre_apto: "Torre 3 · Apto 502", activo: true, es_fundador: true },
+    { id: ps2, nombre: "Camilo", rol: "paseador", telefono: "3004445566", torre_apto: "Torre 1 · Apto 101", activo: true },
+  ];
   const duenos = [
     { id: d1, nombre: "Laura Restrepo", torre_apto: "Torre 3 · Apto 502", telefono: "3001234567", plan: "grupal_3x", activo: true },
     { id: d2, nombre: "Andrés Gómez", torre_apto: "Torre 1 · Apto 204", telefono: "3019876543", plan: "grupal_2x", activo: true },
     { id: d3, nombre: "Marcela 600", torre_apto: "Torre 2 · Apto 801", telefono: "3025557788", plan: "individual_3x", activo: true },
   ];
   const perros = [
-    { id: p1, nombre: "Rocco", emoji: "🐕", dueno_id: d1, raza: "Labrador", edad: "3 años", tamano: "grande", energia: "alta", temperamento: "sociable", condicion: "ninguna", vacunas_al_dia: true, alergias: "", notas_salud: "", torre_apto: "Torre 3 · Apto 502", activo: true },
-    { id: p2, nombre: "Luna", emoji: "🦮", dueno_id: d2, raza: "Criolla", edad: "5 años", tamano: "mediano", energia: "media", temperamento: "reservado", condicion: "ninguna", vacunas_al_dia: true, alergias: "Pollo", notas_salud: "", torre_apto: "Torre 1 · Apto 204", activo: true },
-    { id: p3, nombre: "Thor", emoji: "🐺", dueno_id: d3, raza: "Pitbull", edad: "4 años", tamano: "grande", energia: "alta", temperamento: "reservado", condicion: "cme", vacunas_al_dia: true, alergias: "", notas_salud: "Usa bozal. Solo individual.", torre_apto: "Torre 2 · Apto 801", activo: true },
+    { id: p1, nombre: "Rocco", emoji: "🐕", dueno_id: d1, paseador_id: ps1, raza: "Labrador", edad: "3 años", tamano: "grande", energia: "alta", temperamento: "sociable", condicion: "ninguna", vacunas_al_dia: true, alergias: "", notas_salud: "", torre_apto: "Torre 3 · Apto 502", activo: true },
+    { id: p2, nombre: "Luna", emoji: "🦮", dueno_id: d2, paseador_id: ps2, raza: "Criolla", edad: "5 años", tamano: "mediano", energia: "media", temperamento: "reservado", condicion: "ninguna", vacunas_al_dia: true, alergias: "Pollo", notas_salud: "", torre_apto: "Torre 1 · Apto 204", activo: true },
+    { id: p3, nombre: "Thor", emoji: "🐺", dueno_id: d3, paseador_id: ps1, raza: "Pitbull", edad: "4 años", tamano: "grande", energia: "alta", temperamento: "reservado", condicion: "cme", vacunas_al_dia: true, alergias: "", notas_salud: "Usa bozal. Solo individual.", torre_apto: "Torre 2 · Apto 801", activo: true },
   ];
   const per = periodoActual();
   const pagos = [
@@ -246,22 +374,30 @@ function datosEjemplo() {
     { id: uid("pg"), dueno_id: d3, periodo: per, monto: 260000, estado: "pendiente", fecha_pago: "" },
   ];
   const paseos = [
-    { id: uid("w"), fecha: hoyISO(), ronda: "ronda1", modalidad: "grupal", perro_ids: [p1, p2], duracion: 55, nota: "Rocco jaló al inicio, luego bien. Luna tranquila.", estado: "completado" },
+    { id: uid("w"), fecha: hoyISO(), ronda: "ronda1", modalidad: "grupal", perro_ids: [p1, p2], paseador_id: ps1, duracion: 55, nota: "Rocco jaló al inicio, luego bien. Luna tranquila.", estado: "completado" },
     // Programados a futuro (agenda, Fase 3)
-    { id: uid("w"), fecha: hoyISO(), ronda: "ronda4", modalidad: "grupal", perro_ids: [p1, p2], duracion: 60, nota: "", estado: "programado" },
-    { id: uid("w"), fecha: sumarDias(hoyISO(), 1), ronda: "ronda1", modalidad: "grupal", perro_ids: [p1, p2], duracion: 60, nota: "", estado: "programado" },
-    { id: uid("w"), fecha: sumarDias(hoyISO(), 1), ronda: "ronda2", modalidad: "individual", perro_ids: [p3], duracion: 45, nota: "", estado: "programado" },
-    { id: uid("w"), fecha: sumarDias(hoyISO(), 2), ronda: "ronda3", modalidad: "individual", perro_ids: [p3], duracion: 45, nota: "", estado: "programado" },
+    { id: uid("w"), fecha: hoyISO(), ronda: "ronda4", modalidad: "grupal", perro_ids: [p1, p2], paseador_id: ps1, duracion: 60, nota: "", estado: "programado" },
+    { id: uid("w"), fecha: sumarDias(hoyISO(), 1), ronda: "ronda1", modalidad: "grupal", perro_ids: [p1, p2], paseador_id: ps2, duracion: 60, nota: "", estado: "programado" },
+    { id: uid("w"), fecha: sumarDias(hoyISO(), 1), ronda: "ronda2", modalidad: "individual", perro_ids: [p3], paseador_id: ps1, duracion: 45, nota: "", estado: "programado" },
+    { id: uid("w"), fecha: sumarDias(hoyISO(), 2), ronda: "ronda3", modalidad: "individual", perro_ids: [p3], paseador_id: ps1, duracion: 45, nota: "", estado: "programado" },
   ];
   const productos = [
     { id: uid("prod"), nombre: "Snacks naturales", emoji: "🦴", descripcion: "Premios de pollo deshidratado, bolsa de 200g.", precio: 18000, categoria: "alimento", stock: 12, disponible: true },
     { id: uid("prod"), nombre: "Pechera antitirón", emoji: "🦺", descripcion: "Talla M, ajustable. Cómoda para las lomas del barrio.", precio: 45000, categoria: "accesorio", stock: 5, disponible: true },
     { id: uid("prod"), nombre: "Shampoo hipoalergénico", emoji: "🧴", descripcion: "Para piel sensible, 500ml. Aroma suave.", precio: 28000, categoria: "higiene", stock: 8, disponible: true },
-    { id: uid("prod"), nombre: "Collar reflectivo", emoji: "🟢", descripcion: "Visible en paseos de noche (Ronda 4). Verde Caninatas.", precio: 22000, categoria: "accesorio", stock: 0, disponible: true },
+    { id: uid("prod"), nombre: "Collar reflectivo", emoji: "🟢", descripcion: "Visible en paseos de noche (Ronda 6). Verde Caninatas.", precio: 22000, categoria: "accesorio", stock: 0, disponible: true },
     { id: uid("prod"), nombre: "Bolsas biodegradables", emoji: "♻️", descripcion: "Rollo x 120 bolsas para recoger en zonas comunes.", precio: 15000, categoria: "higiene", stock: 20, disponible: true },
   ];
   const pedidos = [];
-  return { duenos, perros, pagos, paseos, productos, pedidos };
+  // Plantillas de rutina: "esta ronda va este día de la semana" (1=lun … 7=dom)
+  const plantillas = [
+    { id: uid("pl"), dia_semana: 1, ronda: "ronda1", modalidad: "grupal", perro_ids: [p1, p2], paseador_id: ps1, activa: true },
+    { id: uid("pl"), dia_semana: 3, ronda: "ronda1", modalidad: "grupal", perro_ids: [p1, p2], paseador_id: ps1, activa: true },
+    { id: uid("pl"), dia_semana: 5, ronda: "ronda1", modalidad: "grupal", perro_ids: [p1, p2], paseador_id: ps1, activa: true },
+    { id: uid("pl"), dia_semana: 2, ronda: "ronda4", modalidad: "individual", perro_ids: [p3], paseador_id: ps1, activa: true },
+    { id: uid("pl"), dia_semana: 4, ronda: "ronda4", modalidad: "individual", perro_ids: [p3], paseador_id: ps1, activa: true },
+  ];
+  return { duenos, perros, pagos, paseos, productos, pedidos, paseadores, plantillas };
 }
 
 /* ======================================================================= */
@@ -279,11 +415,80 @@ export default function App() {
   const [paseos, setPaseos] = useState([]);
   const [productos, setProductos] = useState([]);
   const [pedidos, setPedidos] = useState([]);
+  const [paseadores, setPaseadores] = useState([]);
+  const [plantillas, setPlantillas] = useState([]);
+  const [usuarioActivoId, setUsuarioActivoId] = useState(null); // quién está viendo la app
+  const [migracion, setMigracion] = useState(null); // {claves:[], estado:'ofrecer'|'migrando'|'listo'} | null
 
   /* -------- Carga inicial -------- */
   useEffect(() => {
     (async () => {
       try {
+        // ---- Migración única localStorage → Supabase ----
+        // Si estamos en la nube y hay datos locales sin migrar, ofrecer subirlos.
+        if (store.usandoNube) {
+          const yaMigro = await store.get("config:migrado_a_nube");
+          if (!yaMigro) {
+            const clavesLocales = leerClavesLocales();
+            if (clavesLocales.length > 0) {
+              // Hay datos locales: ofrecer migración antes de sembrar ejemplos.
+              setMigracion({ claves: clavesLocales, estado: "ofrecer" });
+              setCargando(false);
+              return; // esperamos la decisión del usuario
+            }
+            // No hay datos locales: marcar migración como hecha y seguir normal.
+            await store.set("config:migrado_a_nube", true);
+          }
+        }
+        await sembrarYCargar();
+      } catch (e) {
+        setError("No pudimos cargar los datos. Intentá recargar la app.");
+      } finally {
+        setCargando(false);
+      }
+    })();
+  }, []);
+
+  // Lee las claves de localStorage que pertenecen a la app (prefijos conocidos)
+  const leerClavesLocales = () => {
+    try {
+      const prefijos = Object.keys(TABLA_POR_PREFIJO);
+      return Object.keys(localStorage).filter((k) => prefijos.some((p) => k.startsWith(p + ":")));
+    } catch (e) { return []; }
+  };
+
+  // Sube los datos locales a la nube, sin borrar el localStorage (queda de respaldo)
+  const ejecutarMigracion = async () => {
+    setMigracion((m) => ({ ...m, estado: "migrando" }));
+    try {
+      for (const key of migracion.claves) {
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        try { await store.set(key, JSON.parse(raw)); } catch (e) { /* salta claves corruptas */ }
+      }
+      await store.set("config:migrado_a_nube", true);
+      setMigracion(null);
+      setCargando(true);
+      await sembrarYCargar();
+      setCargando(false);
+    } catch (e) {
+      setError("No pudimos subir tus datos a la nube. Revisá tu internet y reintentá 🐾");
+      setMigracion((m) => ({ ...m, estado: "ofrecer" }));
+    }
+  };
+
+  // Omite la migración: empieza limpio en la nube (los datos locales quedan intactos)
+  const omitirMigracion = async () => {
+    await store.set("config:migrado_a_nube", true);
+    setMigracion(null);
+    setCargando(true);
+    await sembrarYCargar();
+    setCargando(false);
+  };
+
+  // Siembra datos de ejemplo (si aplica) y carga todo en memoria
+  const sembrarYCargar = async () => {
+    try {
         const sembrado = await store.get("config:sembrado");
         if (!sembrado) {
           const ej = datosEjemplo();
@@ -293,9 +498,13 @@ export default function App() {
             ...ej.pagos.map((g) => store.set(`pagos:${g.periodo}:${g.id}`, g)),
             ...ej.paseos.map((w) => store.set(`paseos:${w.fecha}:${w.id}`, w)),
             ...ej.productos.map((pr) => store.set(`productos:${pr.id}`, pr)),
+            ...ej.paseadores.map((pa) => store.set(`paseadores:${pa.id}`, pa)),
+            ...ej.plantillas.map((pl) => store.set(`plantillas:${pl.id}`, pl)),
           ]);
           await store.set("config:sembrado", true);
           await store.set("config:sembrado_tienda", true);
+          await store.set("config:sembrado_paseadores", true);
+          await store.set("config:sembrado_plantillas", true);
         }
         // Sembrado incremental de tienda (para apps ya instaladas antes de la Fase 5)
         const sembradoTienda = await store.get("config:sembrado_tienda");
@@ -304,29 +513,41 @@ export default function App() {
           await Promise.all(ej.productos.map((pr) => store.set(`productos:${pr.id}`, pr)));
           await store.set("config:sembrado_tienda", true);
         }
+        // Sembrado incremental de paseadores (para apps ya instaladas antes de la Fase 6)
+        const sembradoPas = await store.get("config:sembrado_paseadores");
+        if (!sembradoPas) {
+          const ej = datosEjemplo();
+          await Promise.all(ej.paseadores.map((pa) => store.set(`paseadores:${pa.id}`, pa)));
+          await store.set("config:sembrado_paseadores", true);
+        }
+        // Sembrado incremental de plantillas (para apps instaladas antes de esta versión)
+        const sembradoPl = await store.get("config:sembrado_plantillas");
+        if (!sembradoPl) {
+          const ej = datosEjemplo();
+          await Promise.all(ej.plantillas.map((pl) => store.set(`plantillas:${pl.id}`, pl)));
+          await store.set("config:sembrado_plantillas", true);
+        }
         await recargar();
-      } catch (e) {
-        setError("No pudimos cargar los datos. Intentá recargar la app.");
-      } finally {
-        setCargando(false);
-      }
-    })();
-  }, []);
+    } catch (e) {
+      setError(store.usandoNube
+        ? "No pudimos conectar con la nube. Revisá tu internet y reintentá 🐾"
+        : "No pudimos cargar los datos. Intentá recargar la app.");
+    }
+  };
 
   const recargar = useCallback(async () => {
     try {
-      const cargarPrefijo = async (prefijo) => {
-        const keys = await store.list(prefijo);
-        const items = await Promise.all(keys.map((k) => store.get(k)));
-        return items.filter(Boolean);
-      };
-      const [ds, ps, gs, ws, prs, pds] = await Promise.all([
+      // listaCompleta trae clave+data de cada tabla en una sola petición
+      const cargarPrefijo = (prefijo) => store.listaCompleta(prefijo);
+      const [ds, ps, gs, ws, prs, pds, pas, pls] = await Promise.all([
         cargarPrefijo("duenos:"),
         cargarPrefijo("perros:"),
         cargarPrefijo("pagos:"),
         cargarPrefijo("paseos:"),
         cargarPrefijo("productos:"),
         cargarPrefijo("pedidos:"),
+        cargarPrefijo("paseadores:"),
+        cargarPrefijo("plantillas:"),
       ]);
       setDuenos(ds);
       setPerros(ps);
@@ -334,46 +555,121 @@ export default function App() {
       setPaseos(ws);
       setProductos(prs);
       setPedidos(pds);
+      setPaseadores(pas);
+      setPlantillas(pls);
+      setUsuarioActivoId((prev) => prev || pas.find((x) => x.es_fundador)?.id || pas[0]?.id || null);
     } catch (e) {
-      setError("Hubo un problema leyendo la información guardada.");
+      setError(store.usandoNube
+        ? "No pudimos conectar con la nube. Revisá tu internet y volvé a intentar 🐾"
+        : "Hubo un problema leyendo la información guardada.");
     }
   }, []);
 
   /* -------- Persistencia de entidades -------- */
+  // Normaliza teléfono a solo dígitos para comparar
+  const soloDigitos = (t) => String(t || "").replace(/[^\d]/g, "");
+
   const guardarPerro = async (perro) => {
+    // Anti-duplicado: mismo nombre + mismo dueño (solo al crear)
+    if (!perro.id) {
+      const dup = perros.find((p) => p.activo !== false
+        && p.dueno_id === perro.dueno_id
+        && p.nombre.trim().toLowerCase() === (perro.nombre || "").trim().toLowerCase());
+      if (dup) return { ok: false, error: "Ojo, ese perro ya está registrado con ese dueño 🐾" };
+    }
     const p = perro.id ? perro : { ...perro, id: uid("p") };
     await store.set(`perros:${p.id}`, p);
     await recargar();
+    return { ok: true };
   };
   const guardarDueno = async (dueno) => {
+    // Anti-duplicado: mismo teléfono, o mismo nombre + mismo apto (solo al crear)
+    if (!dueno.id) {
+      const telNuevo = soloDigitos(dueno.telefono);
+      const dup = duenos.find((d) => {
+        if (d.activo === false) return false;
+        const mismoTel = telNuevo && soloDigitos(d.telefono) === telNuevo;
+        const mismoNombreApto = d.nombre.trim().toLowerCase() === (dueno.nombre || "").trim().toLowerCase()
+          && (d.torre_apto || "").trim().toLowerCase() === (dueno.torre_apto || "").trim().toLowerCase();
+        return mismoTel || mismoNombreApto;
+      });
+      if (dup) return { ok: false, error: "Ojo, ese vecino ya está registrado 🐾" };
+    }
     const d = dueno.id ? dueno : { ...dueno, id: uid("d") };
     await store.set(`duenos:${d.id}`, d);
     await recargar();
+    return { ok: true };
   };
   const guardarPaseo = async (paseo) => {
+    // Anti-duplicado: no dos paseos activos del mismo perro, misma fecha y misma ronda
+    const activos = ["cancelado", "reprogramado"];
+    if (!activos.includes(paseo.estado)) {
+      const choca = paseos.some((w) => w.id !== paseo.id
+        && w.fecha === paseo.fecha && w.ronda === paseo.ronda
+        && !activos.includes(w.estado)
+        && w.perro_ids.some((id) => (paseo.perro_ids || []).includes(id)));
+      if (choca) return { ok: false, error: "Ojo, alguno de esos perros ya tiene paseo en esa ronda 🐾" };
+    }
     const w = paseo.id ? paseo : { ...paseo, id: uid("w") };
     await store.set(`paseos:${w.fecha}:${w.id}`, w);
     await recargar();
+    return { ok: true };
   };
   const guardarPago = async (pago) => {
     const g = pago.id ? pago : { ...pago, id: uid("pg") };
     await store.set(`pagos:${g.periodo}:${g.id}`, g);
     await recargar();
+    return { ok: true };
   };
   const guardarProducto = async (producto) => {
     const pr = producto.id ? producto : { ...producto, id: uid("prod") };
     await store.set(`productos:${pr.id}`, pr);
     await recargar();
+    return { ok: true };
   };
   const guardarPedido = async (pedido) => {
     const pe = pedido.id ? pedido : { ...pedido, id: uid("ped"), fecha: hoyISO() };
     await store.set(`pedidos:${pe.fecha}:${pe.id}`, pe);
     await recargar();
+    return { ok: true };
+  };
+  const guardarPaseador = async (paseador) => {
+    const pa = paseador.id ? paseador : { ...paseador, id: uid("ps") };
+    await store.set(`paseadores:${pa.id}`, pa);
+    await recargar();
+    return { ok: true };
+  };
+  // Plantillas recurrentes de agenda: "esta ronda va este día de la semana"
+  const guardarPlantilla = async (plantilla) => {
+    // Anti-duplicado: no dos plantillas con el mismo día + ronda + mismo perro
+    if (!plantilla.id) {
+      const dup = plantillas.find((pl) => pl.activa !== false
+        && pl.dia_semana === plantilla.dia_semana && pl.ronda === plantilla.ronda
+        && pl.perro_ids.some((id) => (plantilla.perro_ids || []).includes(id)));
+      if (dup) return { ok: false, error: "Ojo, ya hay una plantilla con ese perro en ese día y ronda 🐾" };
+    }
+    const pl = plantilla.id ? plantilla : { ...plantilla, id: uid("pl") };
+    await store.set(`plantillas:${pl.id}`, pl);
+    await recargar();
+    return { ok: true };
   };
 
+  // Usuario activo y permisos
+  const usuarioActivo = paseadores.find((p) => p.id === usuarioActivoId) || null;
+  const esAdmin = !MULTIPASEADOR_ACTIVO || !usuarioActivo || usuarioActivo.rol === "admin";
+
+  // Filtros por rol: el admin ve todo; el paseador solo lo suyo
+  const perrosVisibles = esAdmin ? perros : perros.filter((p) => p.paseador_id === usuarioActivoId);
+  const paseosVisibles = esAdmin ? paseos : paseos.filter((w) => w.paseador_id === usuarioActivoId);
+
+  // Plantillas visibles por rol
+  const plantillasVisibles = esAdmin ? plantillas : plantillas.filter((pl) => pl.paseador_id === usuarioActivoId);
+
   const ctx = {
-    duenos, perros, pagos, paseos, productos, pedidos,
-    guardarPerro, guardarDueno, guardarPaseo, guardarPago, guardarProducto, guardarPedido, recargar,
+    duenos, perros, pagos, paseos, productos, pedidos, paseadores, plantillas,
+    perrosVisibles, paseosVisibles, plantillasVisibles,
+    usuarioActivo, usuarioActivoId, setUsuarioActivoId, esAdmin,
+    guardarPerro, guardarDueno, guardarPaseo, guardarPago, guardarProducto, guardarPedido, guardarPaseador, guardarPlantilla, recargar,
     abrirDetalle: (id) => setPerroDetalleId(id),
     cerrarDetalle: () => setPerroDetalleId(null),
   };
@@ -390,6 +686,35 @@ export default function App() {
     );
   }
 
+  // Pantalla de migración: ofrecer subir los datos locales a la nube
+  if (migracion) {
+    return (
+      <Shell>
+        <div style={{ padding: "40px 24px", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", minHeight: "80vh", justifyContent: "center", gap: 16 }}>
+          <img src={LOGO_CANINATAS} alt="Caninatas" style={{ width: 80, height: 80, borderRadius: "50%" }} />
+          <div style={{ fontSize: 22, fontWeight: 800, color: C.verde }}>Pasemos tus datos a la nube ☁️</div>
+          <div style={{ fontSize: 15, color: C.carbon, lineHeight: 1.5, maxWidth: 320 }}>
+            Encontramos <b>{migracion.claves.length}</b> registros guardados en este teléfono.
+            ¿Querés subirlos a la nube para verlos desde cualquier dispositivo? Tus datos locales quedan intactos como respaldo.
+          </div>
+          {migracion.estado === "migrando" ? (
+            <div style={{ ...S.centro, flexDirection: "column", gap: 12, marginTop: 8 }}>
+              <div style={S.spinner} />
+              <div style={{ color: C.gris, fontSize: 14 }}>Subiendo tus datos…</div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 300, marginTop: 8 }}>
+              <button style={S.btnPrimario} onClick={ejecutarMigracion}>Sí, subir mis datos</button>
+              <button style={S.btnMiniGhost} onClick={omitirMigracion}>Empezar limpio en la nube</button>
+            </div>
+          )}
+          {error && <div style={{ ...S.errorBanner, marginTop: 10 }}>{error}</div>}
+        </div>
+        <Estilos />
+      </Shell>
+    );
+  }
+
   return (
     <Shell>
       {error && (
@@ -399,12 +724,17 @@ export default function App() {
         </div>
       )}
 
+      {MULTIPASEADOR_ACTIVO && paseadores.length > 1 && (
+        <SelectorUsuario ctx={ctx} />
+      )}
+
       <div style={{ paddingBottom: 96 }}>
         {tab === "manada" && <Manada ctx={ctx} />}
         {tab === "agenda" && <Agenda ctx={ctx} />}
-        {tab === "paseos" && <Paseos ctx={ctx} />}
-        {tab === "pagos" && <Pagos ctx={ctx} />}
+        {tab === "pagos" && esAdmin && <Pagos ctx={ctx} />}
+        {tab === "pagos" && !esAdmin && <SinAcceso />}
         {tab === "tienda" && TIENDA_ACTIVA && <Tienda ctx={ctx} />}
+        {tab === "equipo" && esAdmin && <Equipo ctx={ctx} />}
         {tab === "resumen" && <Resumen ctx={ctx} />}
       </div>
 
@@ -412,7 +742,7 @@ export default function App() {
         <DetallePerro ctx={ctx} perroId={perroDetalleId} onCerrar={() => setPerroDetalleId(null)} />
       )}
 
-      <BarraPestanas tab={tab} setTab={setTab} />
+      <BarraPestanas tab={tab} setTab={setTab} esAdmin={esAdmin} />
       <Estilos />
     </Shell>
   );
@@ -422,7 +752,8 @@ export default function App() {
 /*                                MANADA                                   */
 /* ======================================================================= */
 function Manada({ ctx }) {
-  const { perros, duenos } = ctx;
+  const { perrosVisibles, perros: perrosTodos, duenos } = ctx;
+  const perros = perrosVisibles || perrosTodos;
   const [modal, setModal] = useState(null); // 'perro' | 'dueno' | null
   const [editPerro, setEditPerro] = useState(null);
   const [editDueno, setEditDueno] = useState(null);
@@ -564,7 +895,8 @@ function FormPerro({ ctx, inicial, onCerrar }) {
   const guardar = async () => {
     if (!validar()) return;
     const dueno = duenos.find((d) => d.id === f.dueno_id);
-    await guardarPerro({ ...f, torre_apto: f.torre_apto || dueno?.torre_apto || "" });
+    const r = await guardarPerro({ ...f, torre_apto: f.torre_apto || dueno?.torre_apto || "" });
+    if (r && r.ok === false) { setErr({ dup: r.error }); return; }
     onCerrar();
   };
 
@@ -627,6 +959,7 @@ function FormPerro({ ctx, inicial, onCerrar }) {
         <textarea style={{ ...S.input, minHeight: 70, resize: "vertical" }} value={f.notas_salud} onChange={(e) => set("notas_salud", e.target.value)} placeholder="Medicación, cuidados…" />
       </Campo>
 
+      {err.dup && <div style={S.avisoPeligro}>{err.dup}</div>}
       <button style={S.btnPrimario} onClick={guardar}>{inicial ? "Guardar cambios" : "Registrar perro"}</button>
       {inicial && <button style={S.btnEliminar} onClick={eliminar}>Dar de baja</button>}
     </Modal>
@@ -652,7 +985,8 @@ function FormDueno({ ctx, inicial, onCerrar }) {
   };
   const guardar = async () => {
     if (!validar()) return;
-    await guardarDueno(f);
+    const r = await guardarDueno(f);
+    if (r && r.ok === false) { setErr({ dup: r.error }); return; }
     onCerrar();
   };
   const eliminar = async () => { await guardarDueno({ ...f, activo: false }); onCerrar(); };
@@ -678,6 +1012,7 @@ function FormDueno({ ctx, inicial, onCerrar }) {
           Tarifa {plan.c === "suelto" ? "por paseo" : "mensual"}: <b>{fmtCOP(plan.tarifa)}</b> · modalidad {plan.modalidad}
         </div>
       )}
+      {err.dup && <div style={S.avisoPeligro}>{err.dup}</div>}
       <button style={S.btnPrimario} onClick={guardar}>{inicial ? "Guardar cambios" : "Registrar dueño"}</button>
       {inicial && <button style={S.btnEliminar} onClick={eliminar}>Dar de baja</button>}
     </Modal>
@@ -1074,8 +1409,7 @@ function validarPaseo(paseo, perros, todosPaseos) {
 }
 
 function Agenda({ ctx }) {
-  const { paseos } = ctx;
-  const [vista, setVista] = useState("hoy"); // hoy | semana
+  const [vista, setVista] = useState("hoy"); // hoy | semana | plantillas
   const [lunes, setLunes] = useState(lunesDeSemana(hoyISO()));
   const [programar, setProgramar] = useState(null); // {fecha, ronda} | null
   const [editarPaseo, setEditarPaseo] = useState(null);
@@ -1090,6 +1424,7 @@ function Agenda({ ctx }) {
       <div style={S.segmento}>
         <button style={vista === "hoy" ? S.segActivo : S.segItem} onClick={() => setVista("hoy")}>Hoy</button>
         <button style={vista === "semana" ? S.segActivo : S.segItem} onClick={() => setVista("semana")}>Semana</button>
+        <button style={vista === "plantillas" ? S.segActivo : S.segItem} onClick={() => setVista("plantillas")}>Rutina</button>
       </div>
 
       {vista === "hoy" && <VistaHoy ctx={ctx} onEditar={abrirEditar} onProgramar={abrirProgramar} />}
@@ -1097,8 +1432,11 @@ function Agenda({ ctx }) {
         <VistaSemana ctx={ctx} lunes={lunes} setLunes={setLunes}
           onProgramar={abrirProgramar} onEditar={abrirEditar} />
       )}
+      {vista === "plantillas" && <VistaPlantillas ctx={ctx} />}
 
-      <button style={S.fabAncho} onClick={() => abrirProgramar()}>+ Programar paseo</button>
+      {vista !== "plantillas" && (
+        <button style={S.fabAncho} onClick={() => abrirProgramar()}>+ Programar paseo suelto</button>
+      )}
 
       {(programar || editarPaseo) && (
         <FormProgramar ctx={ctx} pref={programar} inicial={editarPaseo}
@@ -1108,9 +1446,186 @@ function Agenda({ ctx }) {
   );
 }
 
+/* ---- Modelo de agendamiento por plantilla: ronda × día de la semana ---- */
+function VistaPlantillas({ ctx }) {
+  const { plantillasVisibles, plantillas: plantillasTodas, perros, guardarPlantilla, guardarPaseo, paseos } = ctx;
+  const plantillas = plantillasVisibles || plantillasTodas;
+  const [form, setForm] = useState(null); // {dia_semana, ronda} | plantilla
+  const [aviso, setAviso] = useState("");
+
+  // Genera los paseos concretos de la semana actual a partir de las plantillas
+  const generarSemana = async () => {
+    const lunes = lunesDeSemana(hoyISO());
+    const dias = semanaDesde(lunes);
+    let creados = 0, saltados = 0;
+    for (const pl of plantillas.filter((p) => p.activa !== false)) {
+      // dia_semana: 1=lun … 7=dom. Mapear al ISO de esa semana.
+      const idx = pl.dia_semana === 7 ? 6 : pl.dia_semana - 1;
+      const fecha = dias[idx];
+      if (fecha < hoyISO()) { continue; } // no generar días ya pasados
+      const r = await guardarPaseo({
+        fecha, ronda: pl.ronda, modalidad: pl.modalidad || "grupal",
+        perro_ids: pl.perro_ids, paseador_id: pl.paseador_id || null,
+        duracion: 55, nota: "", estado: "programado", desde_plantilla: pl.id,
+      });
+      if (r && r.ok === false) saltados++; else creados++;
+    }
+    setAviso(`Se generaron ${creados} paseo${creados !== 1 ? "s" : ""} de la semana.${saltados ? ` ${saltados} ya existían.` : ""}`);
+    setTimeout(() => setAviso(""), 3500);
+  };
+
+  const activas = plantillas.filter((p) => p.activa !== false);
+
+  return (
+    <div>
+      <div style={S.avisoInfo}>
+        🗓️ La <b>rutina</b> es la plantilla que se repite cada semana: "esta ronda, este día". Desde acá generás los paseos concretos de la semana con un toque.
+      </div>
+
+      {aviso && <div style={{ ...S.avisoInfo, background: C.verde + "18", color: C.verde, border: `1px solid ${C.verde}55` }}>{aviso}</div>}
+
+      {DIAS_LARGO.map((nombreDia, i) => {
+        // i: 0=domingo … 6=sábado. dia_semana usa 1=lun … 7=dom
+        const diaSemana = i === 0 ? 7 : i;
+        const delDia = activas.filter((p) => p.dia_semana === diaSemana)
+          .sort((a, b) => RONDAS.findIndex((r) => r.c === a.ronda) - RONDAS.findIndex((r) => r.c === b.ronda));
+        if (i === 0) return null; // domingo lo movemos al final
+        return (
+          <BloqueDiaPlantilla key={i} nombreDia={nombreDia} diaSemana={diaSemana}
+            plantillas={delDia} perros={perros} onAgregar={() => setForm({ dia_semana: diaSemana })}
+            onEditar={(pl) => setForm(pl)} />
+        );
+      })}
+      {/* Domingo al final */}
+      <BloqueDiaPlantilla nombreDia="domingo" diaSemana={7}
+        plantillas={activas.filter((p) => p.dia_semana === 7).sort((a, b) => RONDAS.findIndex((r) => r.c === a.ronda) - RONDAS.findIndex((r) => r.c === b.ronda))}
+        perros={perros} onAgregar={() => setForm({ dia_semana: 7 })} onEditar={(pl) => setForm(pl)} />
+
+      {activas.length > 0 && (
+        <button style={S.fabAncho} onClick={generarSemana}>⚡ Generar paseos de esta semana</button>
+      )}
+
+      {form && <FormPlantilla ctx={ctx} inicial={form.id ? form : null} pref={form} onCerrar={() => setForm(null)} />}
+    </div>
+  );
+}
+
+function BloqueDiaPlantilla({ nombreDia, diaSemana, plantillas, perros, onAgregar, onEditar }) {
+  return (
+    <div style={S.rondaBloque}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: plantillas.length ? 8 : 0 }}>
+        <span style={{ fontWeight: 800, color: C.carbon, fontSize: 15, textTransform: "capitalize" }}>{nombreDia}</span>
+        <button style={S.agregarChip} onClick={onAgregar}>+ Ronda</button>
+      </div>
+      {plantillas.map((pl) => {
+        const ronda = rondaPorC(pl.ronda);
+        const asistentes = pl.perro_ids.map((id) => perros.find((p) => p.id === id)).filter(Boolean);
+        return (
+          <button key={pl.id} style={S.plantillaFila} onClick={() => onEditar(pl)}>
+            <div style={{ flex: 1, textAlign: "left", minWidth: 0 }}>
+              <div style={{ fontWeight: 700, color: C.carbon, fontSize: 13.5 }}>{ronda?.l.split(" · ")[0]} · {ronda?.l.split(" · ")[1]}</div>
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+                {asistentes.map((p) => <span key={p.id} style={S.perroMini}>{p.emoji || "🐶"} {p.nombre}</span>)}
+              </div>
+            </div>
+            <span style={pl.modalidad === "individual" ? S.chipIndiv : S.chipGrupal}>
+              {pl.modalidad === "individual" ? "Ind." : "Grupal"}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FormPlantilla({ ctx, inicial, pref, onCerrar }) {
+  const { perros, guardarPlantilla, plantillas } = ctx;
+  const activos = perros.filter((p) => p.activo !== false);
+  const [f, setF] = useState(inicial || {
+    dia_semana: pref?.dia_semana || 1, ronda: "ronda1", modalidad: "grupal", perro_ids: [], activa: true,
+  });
+  const [errDup, setErrDup] = useState("");
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const hayCME = f.perro_ids.some((id) => esCME(activos.find((x) => x.id === id)?.condicion));
+
+  const togglePerro = (p) => {
+    const ya = f.perro_ids.includes(p.id);
+    if (ya) {
+      const nuevos = f.perro_ids.filter((id) => id !== p.id);
+      setF((s) => ({ ...s, perro_ids: nuevos, modalidad: nuevos.length <= 1 ? s.modalidad : "grupal" }));
+      return;
+    }
+    if (esCME(p.condicion)) { setF((s) => ({ ...s, perro_ids: [p.id], modalidad: "individual" })); return; }
+    if (hayCME) return;
+    if (f.perro_ids.length >= CUPO_RONDA) return;
+    const nuevos = [...f.perro_ids, p.id];
+    setF((s) => ({ ...s, perro_ids: nuevos, modalidad: nuevos.length > 1 ? "grupal" : s.modalidad }));
+  };
+
+  const guardar = async () => {
+    if (f.perro_ids.length === 0) { setErrDup("Elegí al menos un perro."); return; }
+    const r = await guardarPlantilla(f);
+    if (r && r.ok === false) { setErrDup(r.error); return; }
+    onCerrar();
+  };
+  const eliminar = async () => { await guardarPlantilla({ ...f, activa: false }); onCerrar(); };
+
+  const nombreDia = DIAS_LARGO[f.dia_semana === 7 ? 0 : f.dia_semana];
+
+  return (
+    <Modal titulo={inicial ? "Editar rutina" : "Nueva rutina"} onCerrar={onCerrar}>
+      <div style={S.avisoInfo}>Esta ronda se repetirá todos los <b style={{ textTransform: "capitalize" }}>{nombreDia}</b>.</div>
+
+      <Campo label="Día de la semana">
+        <select style={S.input} value={f.dia_semana} onChange={(e) => set("dia_semana", Number(e.target.value))}>
+          {[1, 2, 3, 4, 5, 6, 7].map((d) => (
+            <option key={d} value={d}>{DIAS_LARGO[d === 7 ? 0 : d].charAt(0).toUpperCase() + DIAS_LARGO[d === 7 ? 0 : d].slice(1)}</option>
+          ))}
+        </select>
+      </Campo>
+
+      <Campo label="Ronda">
+        <select style={S.input} value={f.ronda} onChange={(e) => set("ronda", e.target.value)}>
+          {RONDAS.map((r) => <option key={r.c} value={r.c}>{r.l}</option>)}
+        </select>
+      </Campo>
+
+      <Campo label={`Perros (${f.perro_ids.length}${hayCME ? "" : `/${CUPO_RONDA}`})`}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {activos.map((p) => {
+            const marcado = f.perro_ids.includes(p.id);
+            const cme = esCME(p.condicion);
+            const bloqueado = !marcado && ((f.perro_ids.length >= CUPO_RONDA && !cme) || hayCME);
+            return (
+              <button key={p.id} disabled={bloqueado} onClick={() => togglePerro(p)}
+                style={{ ...S.filaAsistencia, ...(marcado ? S.filaAsistenciaOn : {}), opacity: bloqueado ? 0.4 : 1 }}>
+                <span style={{ fontSize: 22 }}>{p.emoji || "🐶"}</span>
+                <div style={{ flex: 1, textAlign: "left" }}>
+                  <div style={{ fontWeight: 600, color: C.carbon }}>
+                    {p.nombre} {cme && <span style={S.chipCMEmini}>CME</span>}
+                  </div>
+                  <div style={{ fontSize: 12, color: C.gris }}>{p.torre_apto}</div>
+                </div>
+                <span style={{ ...S.checkbox, ...(marcado ? S.checkboxOn : {}) }}>{marcado ? "✓" : ""}</span>
+              </button>
+            );
+          })}
+        </div>
+      </Campo>
+
+      {hayCME && <div style={S.avisoInfo}>🛡️ Rutina individual: incluye un Canino de Manejo Especial.</div>}
+      {errDup && <div style={S.avisoPeligro}>{errDup}</div>}
+
+      <button style={S.btnPrimario} onClick={guardar}>{inicial ? "Guardar cambios" : "Crear rutina"}</button>
+      {inicial && <button style={S.btnEliminar} onClick={eliminar}>Quitar de la rutina</button>}
+    </Modal>
+  );
+}
+
 /* ---- Módulo 5: Vista "Hoy" ---- */
 function VistaHoy({ ctx, onEditar, onProgramar }) {
-  const { paseos, perros } = ctx;
+  const { paseosVisibles, paseos: paseosTodos, perros } = ctx;
+  const paseos = paseosVisibles || paseosTodos;
   const hoy = hoyISO();
   const delDia = paseos
     .filter((w) => w.fecha === hoy && !["cancelado", "reprogramado"].includes(w.estado))
@@ -1131,7 +1646,7 @@ function VistaHoy({ ctx, onEditar, onProgramar }) {
 
       {delDia.length === 0 && (
         <Vacio icono="🗓️" titulo="Nada programado para hoy"
-          texto="Programá un paseo o esperá a mañana. La app respeta la pausa de calor de 11 a 3." />
+          texto="Programá un paseo o esperá a mañana. La app respeta la pausa de calor de 11:30 a 2." />
       )}
 
       {delDia.map((w) => (
@@ -1205,12 +1720,12 @@ function DiaPorRondas({ ctx, fecha, onProgramar, onEditar }) {
 
         return (
           <React.Fragment key={r.c}>
-            {/* Bloque de pausa de calor entre ronda 2 y 3 */}
-            {i === 2 && (
+            {/* Bloque de pausa de calor entre Ronda 3 y Ronda 4 */}
+            {i === IDX_PAUSA && (
               <div style={S.franjaCalor}>
                 <span style={{ fontSize: 18 }}>☀️</span>
                 <div>
-                  <div style={{ fontWeight: 800, fontSize: 13.5, color: "#9A6A00" }}>Pausa de calor · 11:00 a.m. – 3:00 p.m.</div>
+                  <div style={{ fontWeight: 800, fontSize: 13.5, color: "#9A6A00" }}>Pausa de calor · 11:30 a.m. – 2:00 p.m.</div>
                   <div style={{ fontSize: 12, color: "#9A6A00", opacity: 0.85 }}>No se agenda: riesgo de golpe de calor en las lomas.</div>
                 </div>
               </div>
@@ -1349,9 +1864,11 @@ function FormProgramar({ ctx, pref, inicial, onCerrar }) {
     setF((s) => ({ ...s, perro_ids: nuevos, modalidad: nuevos.length > 1 ? "grupal" : s.modalidad }));
   };
 
+  const [errDup, setErrDup] = useState("");
   const guardar = async () => {
     if (!ok) return;
-    await guardarPaseo(f);
+    const r = await guardarPaseo(f);
+    if (r && r.ok === false) { setErrDup(r.error); return; }
     onCerrar();
   };
 
@@ -1435,6 +1952,7 @@ function FormProgramar({ ctx, pref, inicial, onCerrar }) {
           {errores.map((e, i) => <div key={i}>• {e}</div>)}
         </div>
       )}
+      {errDup && <div style={S.avisoPeligro}>{errDup}</div>}
 
       <button style={{ ...S.btnPrimario, opacity: ok ? 1 : 0.5 }} disabled={!ok} onClick={guardar}>
         {inicial ? "Guardar cambios" : "Programar paseo"}
@@ -1454,191 +1972,66 @@ function serviceCupo(paseos, fecha, ronda, excluirId) {
 }
 
 /* ======================================================================= */
-/*                                PASEOS                                   */
+/*              BITÁCORA (solo consulta, integrada en Resumen)            */
+/*   El registro nace desde la Agenda; aquí solo se consultan los paseos. */
 /* ======================================================================= */
-function Paseos({ ctx }) {
-  const { paseos, perros } = ctx;
-  const [modal, setModal] = useState(false);
-  const [editar, setEditar] = useState(null);
+// Historial de paseos ya realizados (estado completado), solo lectura.
+function HistorialPaseosResumen({ ctx }) {
+  const { paseosVisibles, paseos: paseosTodos, perros } = ctx;
+  const paseos = paseosVisibles || paseosTodos;
+  const [abierto, setAbierto] = useState(false);
 
-  const ordenados = [...paseos].sort((a, b) => (b.fecha + b.id).localeCompare(a.fecha + a.id));
+  const realizados = [...paseos]
+    .filter((w) => w.estado === "completado")
+    .sort((a, b) => (b.fecha + b.id).localeCompare(a.fecha + a.id));
 
   return (
-    <div>
-      <Header titulo="Bitácora de Paseos" sub={`${paseos.length} paseos registrados`} />
-
-      {ordenados.length === 0 && (
-        <Vacio icono="🚶" titulo="Sin paseos aún"
-          texto="Registrá el primer paseo del día para llevar la asistencia de la manada." />
-      )}
-
-      {ordenados.map((w) => (
-        <TarjetaPaseo key={w.id} paseo={w} perros={perros}
-          onEdit={() => { setEditar(w); setModal(true); }} />
-      ))}
-
-      <button style={S.fabAncho} onClick={() => { setEditar(null); setModal(true); }}>
-        + Registrar paseo
+    <div style={S.bloque}>
+      <button style={S.historialHead} onClick={() => setAbierto((v) => !v)}>
+        <div>
+          <div style={S.bloqueTit}>Historial de paseos</div>
+          <div style={{ fontSize: 13, color: C.gris }}>{realizados.length} paseo{realizados.length !== 1 ? "s" : ""} realizado{realizados.length !== 1 ? "s" : ""}</div>
+        </div>
+        <span style={{ fontSize: 20, color: C.gris, transform: abierto ? "rotate(90deg)" : "none", transition: "transform 0.2s" }}>\u203a</span>
       </button>
 
-      {modal && <FormPaseo ctx={ctx} inicial={editar} onCerrar={() => setModal(false)} />}
+      {abierto && (
+        <div style={{ marginTop: 10 }}>
+          {realizados.length === 0 ? (
+            <div style={{ color: C.gris, fontSize: 14, padding: "6px 2px" }}>
+              Todavía no hay paseos completados. Cuando terminés un paseo desde la Agenda, aparece acá.
+            </div>
+          ) : (
+            realizados.map((w) => (
+              <div key={w.id} style={{ margin: "0 -4px" }}>
+                <TarjetaPaseoCompacta paseo={w} perros={perros} />
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function TarjetaPaseo({ paseo, perros, onEdit }) {
+// Versión compacta para el historial dentro de Resumen (sin margen lateral de card)
+function TarjetaPaseoCompacta({ paseo, perros }) {
   const ronda = RONDAS.find((r) => r.c === paseo.ronda);
   const asistentes = paseo.perro_ids.map((id) => perros.find((p) => p.id === id)).filter(Boolean);
   return (
-    <button style={S.card} onClick={onEdit}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div style={{ textAlign: "left" }}>
-          <div style={S.cardTitulo}>{paseo.fecha}</div>
-          <div style={S.cardSub}>{ronda?.l || paseo.ronda} · {paseo.duracion || "—"} min</div>
-        </div>
-        <span style={paseo.modalidad === "individual" ? S.chipIndiv : S.chipGrupal}>
-          {paseo.modalidad === "individual" ? "Individual" : "Grupal"}
-        </span>
+    <div style={S.histItem}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <span style={{ fontWeight: 800, color: C.carbon, fontSize: 14 }}>{fmtFechaCorta(paseo.fecha)}</span>
+        <span style={{ fontSize: 12, color: C.gris }}>{ronda?.l.split(" · ")[0] || paseo.ronda} · {paseo.duracion || "—"} min</span>
       </div>
-      <div style={S.tagsFila}>
-        {asistentes.map((p) => <Tag key={p.id} color={C.cielo} dark>{p.emoji || "🐶"} {p.nombre}</Tag>)}
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+        {asistentes.map((p) => <span key={p.id} style={S.perroMini}>{p.emoji || "🐶"} {p.nombre}</span>)}
       </div>
-      {paseo.nota && <div style={S.notaPaseo}>“{paseo.nota}”</div>}
-    </button>
+      {paseo.nota && <div style={S.histNota}>“{paseo.nota}”</div>}
+    </div>
   );
 }
 
-/* ------------------------ Formulario Paseo ----------------------------- */
-function FormPaseo({ ctx, inicial, onCerrar }) {
-  const { perros, guardarPaseo } = ctx;
-  const activos = perros.filter((p) => p.activo !== false);
-
-  const [f, setF] = useState(inicial || {
-    fecha: hoyISO(), ronda: "ronda1", modalidad: "grupal",
-    perro_ids: [], duracion: 55, nota: "", estado: "completado",
-  });
-  const [err, setErr] = useState({});
-  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
-
-  // Advertencia de golpe de calor (§4.2b): franja 11:00–15:00
-  const [horaInicio, setHoraInicio] = useState(inicial?.hora_inicio || "");
-  const horaRiesgo = (() => {
-    if (!horaInicio) return false;
-    const h = Number(horaInicio.split(":")[0]);
-    const m = Number(horaInicio.split(":")[1] || 0);
-    const mins = h * 60 + m;
-    return mins >= 11 * 60 && mins < 15 * 60;
-  })();
-
-  const togglePerro = (p) => {
-    const ya = f.perro_ids.includes(p.id);
-    let nuevos;
-    if (ya) {
-      nuevos = f.perro_ids.filter((id) => id !== p.id);
-    } else {
-      // Regla CME: si el perro es de manejo especial, el paseo es individual y único (§4.4)
-      if (esCME(p.condicion)) {
-        setF((s) => ({ ...s, perro_ids: [p.id], modalidad: "individual" }));
-        return;
-      }
-      // Si ya hay un CME seleccionado, no permitir agregar más
-      const hayCME = f.perro_ids.some((id) => esCME(activos.find((x) => x.id === id)?.condicion));
-      if (hayCME) return;
-      if (f.perro_ids.length >= 4) return; // techo de 4 (§4.3)
-      nuevos = [...f.perro_ids, p.id];
-    }
-    const modalidad = nuevos.length === 1 && esCME(activos.find((x) => x.id === nuevos[0])?.condicion)
-      ? "individual"
-      : (nuevos.length === 1 ? f.modalidad : "grupal");
-    setF((s) => ({ ...s, perro_ids: nuevos, modalidad }));
-  };
-
-  const validar = () => {
-    const e = {};
-    if (f.perro_ids.length === 0) e.perros = "Marcá al menos un perro que asistió.";
-    setErr(e);
-    return Object.keys(e).length === 0;
-  };
-
-  const guardar = async () => {
-    if (!validar()) return;
-    await guardarPaseo({ ...f, hora_inicio: horaInicio });
-    onCerrar();
-  };
-
-  const hayCMESeleccionado = f.perro_ids.some((id) => esCME(activos.find((x) => x.id === id)?.condicion));
-
-  return (
-    <Modal titulo={inicial ? "Editar paseo" : "Nuevo paseo"} onCerrar={onCerrar}>
-      <Fila>
-        <Campo label="Fecha">
-          <input style={S.input} type="date" value={f.fecha} onChange={(e) => set("fecha", e.target.value)} />
-        </Campo>
-        <Campo label="Hora inicio">
-          <input style={S.input} type="time" value={horaInicio} onChange={(e) => setHoraInicio(e.target.value)} />
-        </Campo>
-      </Fila>
-
-      {horaRiesgo && (
-        <div style={S.avisoPeligro}>
-          ☀️ <b>Riesgo de golpe de calor.</b> Entre las 11:00 a.m. y las 3:00 p.m. no se pasea:
-          las lomas más el calor son peligrosas, sobre todo para razas braquicéfalas y perros mayores.
-          Reprogramá para la mañana temprano o la tarde.
-        </div>
-      )}
-
-      <Campo label="Ronda">
-        <select style={S.input} value={f.ronda} onChange={(e) => set("ronda", e.target.value)}>
-          {RONDAS.map((r) => <option key={r.c} value={r.c}>{r.l}</option>)}
-        </select>
-      </Campo>
-
-      <Campo label="Duración (minutos)">
-        <input style={S.input} inputMode="numeric" value={f.duracion}
-          onChange={(e) => set("duracion", e.target.value.replace(/[^\d]/g, ""))} placeholder="55" />
-      </Campo>
-
-      <Campo label={`Asistencia (${f.perro_ids.length}${hayCMESeleccionado ? "" : "/4"})`} error={err.perros}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {activos.map((p) => {
-            const marcado = f.perro_ids.includes(p.id);
-            const cme = esCME(p.condicion);
-            const bloqueado = !marcado && ((f.perro_ids.length >= 4 && !cme) || (hayCMESeleccionado));
-            return (
-              <button key={p.id} disabled={bloqueado}
-                onClick={() => togglePerro(p)}
-                style={{
-                  ...S.filaAsistencia,
-                  ...(marcado ? S.filaAsistenciaOn : {}),
-                  opacity: bloqueado ? 0.4 : 1,
-                }}>
-                <span style={{ fontSize: 22 }}>{p.emoji || "🐶"}</span>
-                <div style={{ flex: 1, textAlign: "left" }}>
-                  <div style={{ fontWeight: 600, color: C.carbon }}>
-                    {p.nombre} {cme && <span style={S.chipCMEmini}>CME</span>}
-                  </div>
-                  <div style={{ fontSize: 12, color: C.gris }}>{p.torre_apto}</div>
-                </div>
-                <span style={{ ...S.checkbox, ...(marcado ? S.checkboxOn : {}) }}>{marcado ? "✓" : ""}</span>
-              </button>
-            );
-          })}
-        </div>
-      </Campo>
-
-      {hayCMESeleccionado && (
-        <div style={S.avisoInfo}>🛡️ Paseo individual obligatorio: hay un Canino de Manejo Especial.</div>
-      )}
-
-      <Campo label="Nota de comportamiento">
-        <textarea style={{ ...S.input, minHeight: 70, resize: "vertical" }} value={f.nota}
-          onChange={(e) => set("nota", e.target.value)} placeholder="¿Cómo se portó la manada?" />
-      </Campo>
-
-      <button style={S.btnPrimario} onClick={guardar}>{inicial ? "Guardar cambios" : "Registrar paseo"}</button>
-    </Modal>
-  );
-}
 
 /* ======================================================================= */
 /*                          PAGOS (FASE 4)                                 */
@@ -2390,6 +2783,288 @@ function ListaPedidos({ ctx }) {
 }
 
 /* ======================================================================= */
+/*                      MULTI-PASEADOR (FASE 6)                            */
+/*   Roles, asignación, panel admin. Aprovecha paseador_id de Fase 0.      */
+/* ======================================================================= */
+
+/* Selector de usuario activo: permite al fundador simular cada vista */
+function SelectorUsuario({ ctx }) {
+  const { paseadores, usuarioActivoId, setUsuarioActivoId } = ctx;
+  const activos = paseadores.filter((p) => p.activo !== false);
+  const actual = activos.find((p) => p.id === usuarioActivoId);
+
+  return (
+    <div style={S.selectorUsuario}>
+      <span style={{ fontSize: 12, color: C.gris, fontWeight: 700 }}>Viendo como:</span>
+      <select style={S.selectorSelect} value={usuarioActivoId || ""}
+        onChange={(e) => setUsuarioActivoId(e.target.value)}>
+        {activos.map((p) => (
+          <option key={p.id} value={p.id}>{rolPorC(p.rol).icono} {p.nombre} · {rolPorC(p.rol).l}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+/* Pantalla de acceso restringido para paseadores */
+function SinAcceso() {
+  return (
+    <div>
+      <Header titulo="Sin acceso" sub="Sección solo para el administrador" />
+      <Vacio icono="🔒" titulo="Esta sección es privada"
+        texto="Los pagos y la administración los maneja el fundador. Vos podés ver tus perros, tu agenda y registrar tus paseos." />
+    </div>
+  );
+}
+
+/* Módulo Equipo: gestión de paseadores + panel de administración */
+function Equipo({ ctx }) {
+  const [vista, setVista] = useState("panel"); // panel | paseadores
+
+  return (
+    <div>
+      <Header titulo="Equipo" sub="Paseadores y operación global" />
+      <div style={S.segmento}>
+        <button style={vista === "panel" ? S.segActivo : S.segItem} onClick={() => setVista("panel")}>Panel</button>
+        <button style={vista === "paseadores" ? S.segActivo : S.segItem} onClick={() => setVista("paseadores")}>Paseadores</button>
+      </div>
+
+      {vista === "panel" && <PanelAdmin ctx={ctx} />}
+      {vista === "paseadores" && <GestionPaseadores ctx={ctx} />}
+    </div>
+  );
+}
+
+/* ---- Módulo 4: panel de administración con operación consolidada ---- */
+function PanelAdmin({ ctx }) {
+  const { paseadores, perros, paseos, duenos, pagos } = ctx;
+  const per = periodoActual();
+  const hoy = hoyISO();
+  const activos = paseadores.filter((p) => p.activo !== false);
+
+  // Ingresos totales del mes (cobrados)
+  const cobrado = duenos.filter((d) => d.activo !== false).reduce((s, d) => {
+    const g = pagos.find((x) => x.dueno_id === d.id && x.periodo === per && x.estado === "pagado");
+    return s + (g ? (planPorCodigo(d.plan)?.tarifa || 0) : 0);
+  }, 0);
+  const serviciosHoy = paseos.filter((w) => w.fecha === hoy && !["cancelado", "reprogramado"].includes(w.estado))
+    .reduce((s, w) => s + w.perro_ids.length, 0);
+  const capacidadGlobal = activos.length * CAPACIDAD_DIA;
+
+  return (
+    <div>
+      {/* KPIs globales */}
+      <div style={S.gridKpi}>
+        <Kpi icono="👥" valor={activos.length} label="Paseadores" color={C.verde} />
+        <Kpi icono="🐕" valor={perros.filter((p) => p.activo !== false).length} label="Perros" color={C.terracota} />
+      </div>
+
+      <div style={S.bloque}>
+        <div style={S.bloqueTit}>Ingresos del mes · {nombreMes(per)}</div>
+        <div style={{ fontSize: 28, fontWeight: 800, color: C.verde }}>{fmtCOP(cobrado)}</div>
+        <div style={{ fontSize: 13, color: C.gris, marginTop: 2 }}>Cobrado entre todo el equipo</div>
+      </div>
+
+      <div style={S.bloque}>
+        <div style={S.bloqueTit}>Capacidad global de hoy</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+          <span style={{ fontSize: 26, fontWeight: 800, color: C.verde }}>
+            {serviciosHoy}<span style={{ fontSize: 16, color: C.gris }}> / {capacidadGlobal}</span>
+          </span>
+          <span style={{ color: C.gris, fontSize: 14 }}>servicios</span>
+        </div>
+        <Barra pct={capacidadGlobal ? Math.round(serviciosHoy / capacidadGlobal * 100) : 0} color={C.verdeClaro} />
+        <div style={{ fontSize: 12.5, color: C.gris, marginTop: 6 }}>
+          {activos.length} paseador{activos.length !== 1 ? "es" : ""} × {CAPACIDAD_DIA} servicios diarios
+        </div>
+      </div>
+
+      {/* Operación por paseador */}
+      <div style={S.bloque}>
+        <div style={S.bloqueTit}>Operación por paseador</div>
+        {activos.map((pa) => {
+          const susPerros = perros.filter((p) => p.paseador_id === pa.id && p.activo !== false);
+          const susPaseosHoy = paseos.filter((w) => w.paseador_id === pa.id && w.fecha === hoy && !["cancelado", "reprogramado"].includes(w.estado));
+          const servHoy = susPaseosHoy.reduce((s, w) => s + w.perro_ids.length, 0);
+          return (
+            <div key={pa.id} style={S.paseadorFila}>
+              <div style={S.paseadorAvatar}>{rolPorC(pa.rol).icono}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, color: C.carbon }}>{pa.nombre}
+                  {pa.es_fundador && <span style={S.chipFundador}>Fundador</span>}
+                </div>
+                <div style={{ fontSize: 12.5, color: C.gris }}>{susPerros.length} perros · {servHoy} servicios hoy</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: servHoy >= CAPACIDAD_DIA ? C.rojo : C.verde }}>{servHoy}/{CAPACIDAD_DIA}</div>
+                <div style={{ fontSize: 10.5, color: C.gris }}>capacidad</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ---- Módulos 1, 2 y 3: gestión de paseadores, asignación y roles ---- */
+function GestionPaseadores({ ctx }) {
+  const { paseadores, perros } = ctx;
+  const [editar, setEditar] = useState(null);
+  const [nuevo, setNuevo] = useState(false);
+  const [asignar, setAsignar] = useState(null); // paseador al que asignar perros
+  const activos = paseadores.filter((p) => p.activo !== false);
+
+  return (
+    <div>
+      <div style={{ padding: "0 18px" }}>
+        {activos.map((pa) => {
+          const susPerros = perros.filter((p) => p.paseador_id === pa.id && p.activo !== false);
+          return (
+            <div key={pa.id} style={S.paseadorCard}>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <div style={S.paseadorAvatar}>{rolPorC(pa.rol).icono}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 800, color: C.carbon, fontSize: 15 }}>{pa.nombre}</span>
+                    {pa.es_fundador && <span style={S.chipFundador}>Fundador</span>}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: C.gris }}>{rolPorC(pa.rol).l} · {pa.telefono || "sin teléfono"}</div>
+                  <div style={{ fontSize: 12, color: C.gris, marginTop: 2 }}>{susPerros.length} perros asignados</div>
+                </div>
+                <button style={S.editarLink} onClick={() => setEditar(pa)}>Editar</button>
+              </div>
+              {susPerros.length > 0 && (
+                <div style={S.tagsFila}>
+                  {susPerros.map((p) => <span key={p.id} style={S.perroMini}>{p.emoji || "🐶"} {p.nombre}</span>)}
+                </div>
+              )}
+              <button style={S.asignarBtn} onClick={() => setAsignar(pa)}>Asignar perros</button>
+            </div>
+          );
+        })}
+      </div>
+      <button style={S.fabAncho} onClick={() => setNuevo(true)}>+ Registrar paseador</button>
+
+      {(editar || nuevo) && (
+        <FormPaseador ctx={ctx} inicial={editar} onCerrar={() => { setEditar(null); setNuevo(false); }} />
+      )}
+      {asignar && (
+        <AsignarPerros ctx={ctx} paseador={asignar} onCerrar={() => setAsignar(null)} />
+      )}
+    </div>
+  );
+}
+
+function FormPaseador({ ctx, inicial, onCerrar }) {
+  const { guardarPaseador } = ctx;
+  const [f, setF] = useState(inicial || {
+    nombre: "", rol: "paseador", telefono: "", torre_apto: "", activo: true,
+  });
+  const [err, setErr] = useState({});
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+
+  const validar = () => {
+    const e = {};
+    if (!f.nombre.trim()) e.nombre = "Poné el nombre del paseador.";
+    setErr(e);
+    return Object.keys(e).length === 0;
+  };
+  const guardar = async () => {
+    if (!validar()) return;
+    await guardarPaseador(f);
+    onCerrar();
+  };
+  const eliminar = async () => { await guardarPaseador({ ...f, activo: false }); onCerrar(); };
+
+  return (
+    <Modal titulo={inicial ? "Editar paseador" : "Nuevo paseador"} onCerrar={onCerrar}>
+      <Campo label="Nombre" error={err.nombre} obligatorio>
+        <input style={S.input} value={f.nombre} onChange={(e) => set("nombre", e.target.value)} placeholder="Ej: Camilo" />
+      </Campo>
+
+      <Campo label="Rol">
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {ROLES.map((r) => (
+            <button key={r.c} onClick={() => set("rol", r.c)} disabled={f.es_fundador}
+              style={{ ...S.rolOpcion, ...(f.rol === r.c ? S.rolOpcionOn : {}), opacity: f.es_fundador && r.c !== f.rol ? 0.4 : 1 }}>
+              <span style={{ fontSize: 22 }}>{r.icono}</span>
+              <div style={{ textAlign: "left", flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{r.l}</div>
+                <div style={{ fontSize: 11.5, color: f.rol === r.c ? "#EAF3EE" : C.gris }}>{r.desc}</div>
+              </div>
+              <span style={{ ...S.radio, ...(f.rol === r.c ? S.radioOn : {}) }} />
+            </button>
+          ))}
+        </div>
+        {f.es_fundador && <div style={{ ...S.avisoInfo, marginTop: 8 }}>El fundador siempre es administrador.</div>}
+      </Campo>
+
+      <Campo label="Teléfono (WhatsApp)">
+        <input style={S.input} inputMode="numeric" value={f.telefono}
+          onChange={(e) => set("telefono", e.target.value.replace(/[^\d]/g, ""))} placeholder="3004445566" />
+      </Campo>
+      <Campo label="Torre y apartamento">
+        <input style={S.input} value={f.torre_apto} onChange={(e) => set("torre_apto", e.target.value)} placeholder="Torre 1 · Apto 101" />
+      </Campo>
+
+      <button style={S.btnPrimario} onClick={guardar}>{inicial ? "Guardar cambios" : "Registrar paseador"}</button>
+      {inicial && !f.es_fundador && <button style={S.btnEliminar} onClick={eliminar}>Dar de baja</button>}
+    </Modal>
+  );
+}
+
+/* Módulo 2: asignar perros a un paseador */
+function AsignarPerros({ ctx, paseador, onCerrar }) {
+  const { perros, guardarPerro } = ctx;
+  const activos = perros.filter((p) => p.activo !== false);
+  const [seleccion, setSeleccion] = useState(
+    activos.filter((p) => p.paseador_id === paseador.id).map((p) => p.id)
+  );
+
+  const toggle = (id) => setSeleccion((s) => s.includes(id) ? s.filter((x) => x !== id) : [...s, id]);
+
+  const guardar = async () => {
+    // Asignar los seleccionados a este paseador; quitar los que ya no están
+    await Promise.all(activos.map((p) => {
+      const debe = seleccion.includes(p.id);
+      const tiene = p.paseador_id === paseador.id;
+      if (debe && !tiene) return guardarPerro({ ...p, paseador_id: paseador.id });
+      if (!debe && tiene) return guardarPerro({ ...p, paseador_id: null });
+      return null;
+    }));
+    onCerrar();
+  };
+
+  return (
+    <Modal titulo={`Perros de ${paseador.nombre}`} onCerrar={onCerrar}>
+      <div style={S.avisoInfo}>Marcá los perros que atiende {paseador.nombre}. Cada perro tiene un solo paseador.</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {activos.map((p) => {
+          const marcado = seleccion.includes(p.id);
+          const otroPaseador = p.paseador_id && p.paseador_id !== paseador.id;
+          const nombreOtro = otroPaseador ? (ctx.paseadores.find((x) => x.id === p.paseador_id)?.nombre) : null;
+          return (
+            <button key={p.id} onClick={() => toggle(p.id)}
+              style={{ ...S.filaAsistencia, ...(marcado ? S.filaAsistenciaOn : {}) }}>
+              <span style={{ fontSize: 22 }}>{p.emoji || "🐶"}</span>
+              <div style={{ flex: 1, textAlign: "left" }}>
+                <div style={{ fontWeight: 600, color: C.carbon }}>{p.nombre}</div>
+                <div style={{ fontSize: 12, color: C.gris }}>
+                  {marcado ? "Asignado" : nombreOtro ? `Ahora con ${nombreOtro}` : "Sin asignar"}
+                </div>
+              </div>
+              <span style={{ ...S.checkbox, ...(marcado ? S.checkboxOn : {}) }}>{marcado ? "✓" : ""}</span>
+            </button>
+          );
+        })}
+      </div>
+      <button style={S.btnPrimario} onClick={guardar}>Guardar asignación</button>
+    </Modal>
+  );
+}
+
+/* ======================================================================= */
 /*                                RESUMEN                                  */
 /* ======================================================================= */
 function Resumen({ ctx }) {
@@ -2495,6 +3170,9 @@ function Resumen({ ctx }) {
         )}
       </div>
 
+      {/* Historial de paseos (Bitácora, solo consulta) */}
+      <HistorialPaseosResumen ctx={ctx} />
+
       <div style={{ height: 10 }} />
     </div>
   );
@@ -2523,22 +3201,23 @@ function Header({ titulo, sub }) {
   );
 }
 
-function BarraPestanas({ tab, setTab }) {
+function BarraPestanas({ tab, setTab, esAdmin = true }) {
   const items = [
     { c: "manada", l: "Manada", i: "🐕" },
     { c: "agenda", l: "Agenda", i: "📅" },
-    { c: "paseos", l: "Bitácora", i: "🚶" },
-    { c: "pagos", l: "Pagos", i: "💵" },
+    ...(esAdmin ? [{ c: "pagos", l: "Pagos", i: "💵" }] : []),
     ...(TIENDA_ACTIVA ? [{ c: "tienda", l: "Tienda", i: "🛍️" }] : []),
+    ...(esAdmin && MULTIPASEADOR_ACTIVO ? [{ c: "equipo", l: "Equipo", i: "👥" }] : []),
     { c: "resumen", l: "Resumen", i: "📊" },
   ];
+  const chico = items.length >= 6;
   return (
     <div className="cn-anclado" style={S.tabbar}>
       {items.map((it) => (
         <button key={it.c} onClick={() => setTab(it.c)}
           style={{ ...S.tabItem, ...(tab === it.c ? S.tabItemOn : {}) }}>
-          <span style={{ fontSize: 24, filter: tab === it.c ? "none" : "grayscale(0.4)" }}>{it.i}</span>
-          <span style={{ fontSize: 11.5, fontWeight: tab === it.c ? 700 : 500 }}>{it.l}</span>
+          <span style={{ fontSize: chico ? 20 : 24, filter: tab === it.c ? "none" : "grayscale(0.4)" }}>{it.i}</span>
+          <span style={{ fontSize: chico ? 10 : 11.5, fontWeight: tab === it.c ? 700 : 500 }}>{it.l}</span>
         </button>
       ))}
     </div>
@@ -2656,6 +3335,9 @@ const S = {
   chipIndiv: { fontSize: 11.5, fontWeight: 700, padding: "5px 11px", borderRadius: 20, background: C.terracota + "18", color: C.terracota },
 
   notaPaseo: { marginTop: 10, fontSize: 13.5, color: C.carbon, fontStyle: "italic", background: C.arena, padding: "8px 10px", borderRadius: 10, lineHeight: 1.4 },
+  historialHead: { width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", border: "none", background: "transparent", cursor: "pointer", padding: 0, textAlign: "left" },
+  histItem: { background: C.crema, borderRadius: 12, border: `1px solid ${C.borde}`, padding: "11px 12px", marginBottom: 8 },
+  histNota: { marginTop: 8, fontSize: 12.5, color: C.carbon, fontStyle: "italic", background: C.arena, padding: "6px 9px", borderRadius: 9, lineHeight: 1.4 },
 
   fabAncho: { width: "calc(100% - 36px)", margin: "6px 18px 20px", padding: "16px 0", borderRadius: 16, border: "none", background: C.verde, color: C.blanco, fontWeight: 800, fontSize: 16, cursor: "pointer", boxShadow: "0 4px 14px rgba(47,107,79,0.3)" },
 
@@ -2701,6 +3383,17 @@ const S = {
   alertaPagos: { display: "flex", alignItems: "center", gap: 12, margin: "0 18px 14px", padding: 14, borderRadius: 16, background: "#FBEAEA", border: `1px solid ${C.rojo}33` },
   badgePagado: { fontSize: 12, fontWeight: 800, padding: "6px 12px", borderRadius: 20, background: C.verde + "1A", color: C.verde, whiteSpace: "nowrap" },
   badgePend: { fontSize: 12, fontWeight: 800, padding: "6px 12px", borderRadius: 20, background: C.rojo + "16", color: C.rojo, whiteSpace: "nowrap" },
+
+  // ---- Multi-paseador (Fase 6) ----
+  selectorUsuario: { display: "flex", alignItems: "center", gap: 10, margin: "10px 18px 0", padding: "8px 12px", borderRadius: 12, background: C.cielo + "33", border: `1px solid ${C.cielo}` },
+  selectorSelect: { flex: 1, border: "none", background: "transparent", fontSize: 13.5, fontWeight: 700, color: C.carbon, fontFamily: "inherit", cursor: "pointer", minHeight: 32 },
+  paseadorCard: { padding: 14, borderRadius: 16, background: C.blanco, border: `1px solid ${C.borde}`, marginBottom: 10 },
+  paseadorFila: { display: "flex", gap: 12, alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.crema}` },
+  paseadorAvatar: { width: 44, height: 44, borderRadius: 14, background: C.arena, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 },
+  chipFundador: { fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 12, background: C.verde + "1A", color: C.verde },
+  asignarBtn: { width: "100%", marginTop: 12, padding: "11px 0", borderRadius: 11, border: `1px solid ${C.verde}55`, background: C.verde + "0E", color: C.verde, fontWeight: 700, fontSize: 13.5, cursor: "pointer" },
+  rolOpcion: { display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 12, border: `1px solid ${C.borde}`, background: C.blanco, color: C.carbon, cursor: "pointer", minHeight: 56 },
+  rolOpcionOn: { border: `1px solid ${C.verde}`, background: C.verde, color: C.blanco },
 
   // ---- Tienda (Fase 5) ----
   prodCard: { display: "flex", gap: 12, padding: 14, borderRadius: 16, background: C.blanco, border: `1px solid ${C.borde}`, marginBottom: 10 },
@@ -2783,6 +3476,8 @@ const S = {
   cupoBadge: { fontSize: 12.5, fontWeight: 800, padding: "4px 10px", borderRadius: 20, background: C.verde + "16", color: C.verde },
   cupoBadgeLleno: { background: C.rojo + "14", color: C.rojo },
   agregarRonda: { width: "100%", marginTop: 10, padding: "11px 0", borderRadius: 11, border: `1px dashed ${C.verde}88`, background: "transparent", color: C.verde, fontWeight: 700, fontSize: 13.5, cursor: "pointer" },
+  agregarChip: { border: `1px solid ${C.verde}55`, background: C.verde + "0E", color: C.verde, fontWeight: 700, fontSize: 12.5, padding: "6px 12px", borderRadius: 16, cursor: "pointer" },
+  plantillaFila: { width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 12, border: `1px solid ${C.borde}`, background: C.crema, cursor: "pointer", marginBottom: 8, minHeight: 48 },
   rondaLlena: { marginTop: 10, textAlign: "center", fontSize: 12.5, color: C.gris, fontWeight: 700, padding: "8px 0" },
 
   agCard: { background: C.crema, borderRadius: 14, border: `1px solid ${C.borde}`, padding: 12, margin: "0 18px 10px" },
